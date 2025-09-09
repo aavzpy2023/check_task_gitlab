@@ -3,21 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    ports:
-      - "8001:8001"
-    env_file:
-      - .env # Carga las variables de entorno desde un archivo .env
-    volumes:
-      - .:/app # Monta el directorio actual para ver cambios en vivo
-
+    image: check_task_gitlab-backend:latest
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    ports:
-      - "11112:11112"
-    # El frontend depende del backend para iniciarse
-    depends_on:
-      - backend
-    volumes:
-      - .:/app
+    image: check_task_gitlab-frontend:latest
