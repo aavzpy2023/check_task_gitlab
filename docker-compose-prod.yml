@@ -1,0 +1,29 @@
+services:
+  backend:
+    image: check_task_gitlab-backend:latest
+    container_name: gitlab_backend_service
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.backend
+    environment:
+      - GITLAB_URL=${GITLAB_URL}
+      - GITLAB_TOKEN=${GITLAB_TOKEN}
+    volumes:
+      - .:/app # Monta el directorio actual para ver cambios en vivo
+
+  frontend:
+    image: check_task_gitlab-frontend:latest
+    container_name: gitlab_frontend_service
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.frontend
+    # El frontend depende del backend para iniciarse
+    depends_on:
+      - backend
+    volumes:
+      - .:/app
+
+networks:
+  proxy_global_net:
+    external: true
+    name: red_proxy_global
