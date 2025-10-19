@@ -4,6 +4,7 @@ WORKDIR /app
 COPY requirements_frontend.txt .
 RUN pip install --no-cache-dir -r requirements_frontend.txt
 COPY . .
+COPY ./static ./static
 # Exponemos el puerto de Streamlit
 EXPOSE 11112
 # El entrypoint es necesario para que Streamlit sepa cómo ejecutarse
