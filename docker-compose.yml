@@ -1,11 +1,34 @@
 services:
   backend:
     build:
-      context: .
-      dockerfile: Dockerfile.backend
-    image: check_task_gitlab-backend:latest
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gitlab_dashboard_backend
+    volumes:
+      - ./backend:/app
+    env_file:
+      - .env
+    expose:
+      - "8001"
+    networks:
+      - app-network
+    restart: unless-stopped
+
   frontend:
     build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    image: check_task_gitlab-frontend:latest
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gitlab_dashboard_frontend
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
