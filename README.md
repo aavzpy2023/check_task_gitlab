@@ -75,7 +75,7 @@ The dashboard is currently fully functional for its core purpose of monitoring a
     Then, edit the `.env` file and add your GitLab URL and token.
 
 3. **Configure Projects:**
-    Create a `projects.csv` file from the template:
+    Create a `projects.csv` file inside /backend directory from the template:
 
     ```bash
     cp projects.csv.example projects.csv
