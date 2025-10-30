@@ -6,7 +6,9 @@ from typing import List
 import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+import pypandoc
 
 # --- Data Models (Pydantic) ---
 # Defines the data structure for API responses, ensuring type safety.
@@ -189,3 +191,63 @@ def get_project_review_tasks(project_id: str):
             )
         )
     return task_list
+
+# --- Lógica Auxiliar de la API de GitLab ---
+def gitlab_api_get(endpoint: str):
+    """Función auxiliar para realizar llamadas GET a la API de GitLab."""
+    if not PRIVATE_TOKEN:
+        raise HTTPException(status_code=500, detail="GitLab token no configurado.")
+    headers = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
+    api_url = f"{GITLAB_URL}/api/v4/{endpoint}"
+    try:
+        response = requests.get(api_url, headers=headers, verify=False, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Error al comunicar con GitLab API: {e}")
+
+# --- Endpoints del Portal de Documentación ---
+
+@app.get("/wiki/projects")
+async def list_wiki_projects():
+    """Devuelve la lista de proyectos configurados para el portal."""
+    if not PROJECTS:
+        return []
+    return [{"id": pid, "name": pname} for pid, pname in PROJECTS.items()]
+
+@app.get("/wiki/projects/{project_id}/pages")
+async def list_wiki_pages(project_id: int):
+    """Obtiene la lista de todas las páginas en la wiki de un proyecto."""
+    return gitlab_api_get(f"projects/{project_id}/wikis")
+
+@app.get("/wiki/projects/{project_id}/pages/{slug}")
+async def get_wiki_page_content(project_id: int, slug: str):
+    """Obtiene el contenido raw de una página de la wiki específica."""
+    page_data = gitlab_api_get(f"projects/{project_id}/wikis/{slug}")
+    return {"content": page_data.get("content", ""), "title": page_data.get("title", "")}
+
+@app.get("/wiki/projects/{project_id}/generate_pdf/{slug}")
+async def generate_pdf_on_demand(project_id: int, slug: str):
+    """Genera y devuelve un PDF del contenido de una página de la wiki bajo demanda."""
+    print(f"INFO: Solicitud de PDF para proyecto {project_id}, página '{slug}'")
+    page_data = gitlab_api_get(f"projects/{project_id}/wikis/{slug}")
+    markdown_content = page_data.get("content")
+
+    if not markdown_content:
+        raise HTTPException(status_code=404, detail="No se encontró contenido Markdown para esta página.")
+    
+    try:
+        pdf_output = pypandoc.convert_text(
+            markdown_content, 
+            'pdf', 
+            format='md',
+            extra_args=['--pdf-engine=xelatex'] # Motor robusto para UTF-8
+        )
+        filename = f"{slug}.pdf"
+        return StreamingResponse(
+            BytesIO(pdf_output),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al generar el PDF con Pandoc: {e}")
