@@ -1,9 +1,8 @@
 services:
   backend:
-    # build:
-    #   context: ./backend
-    #   dockerfile: Dockerfile
-    image: check_task_gitlab-backend:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: gitlab_dashboard_backend
     volumes:
       - ./backend:/app
@@ -16,15 +15,14 @@ services:
     restart: unless-stopped
 
   frontend:
-    # build:
-    #   context: ./frontend
-    #   dockerfile: Dockerfile
-    image: check_task_gitlab-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: gitlab_dashboard_frontend
     volumes:
       - ./frontend:/app
     ports:
-      - "8503:8501"
+      - "8501:8501"
     depends_on:
       - backend
     networks:

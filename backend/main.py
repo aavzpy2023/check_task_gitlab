@@ -1,11 +1,19 @@
 import csv
 import os
+import tempfile
 from contextlib import asynccontextmanager
-from typing import List
+from io import BytesIO
+from typing import Any, Dict, List
+from urllib.parse import unquote
 
+import pypandoc
 import requests
+import urllib3
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # --- Data Models (Pydantic) ---
@@ -64,6 +72,24 @@ def load_projects_from_csv():
     except Exception as e:
         print(
             f"🚨 FATAL ERROR: Could not read 'projects.csv'. The application may not function correctly. Error: {e}"
+        )
+
+
+def gitlab_api_request(method: str, endpoint: str, **kwargs):
+    if not PRIVATE_TOKEN:
+        raise HTTPException(status_code=500, detail="GitLab token no configurado.")
+    headers = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
+    api_url = f"{GITLAB_URL}/api/v4/{endpoint}"
+    try:
+        response = requests.request(
+            method, api_url, headers=headers, verify=False, timeout=10, **kwargs
+        )
+        if method.lower() != "head":
+            response.raise_for_status()
+        return response
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(
+            status_code=502, detail=f"Error al comunicar con GitLab API: {e}"
         )
 
 
@@ -189,3 +215,152 @@ def get_project_review_tasks(project_id: str):
             )
         )
     return task_list
+
+
+# --- Lógica Auxiliar de la API de GitLab ---
+def gitlab_api_get(endpoint: str):
+    """Función auxiliar para realizar llamadas GET a la API de GitLab."""
+    if not PRIVATE_TOKEN:
+        raise HTTPException(status_code=500, detail="GitLab token no configurado.")
+    headers = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
+    api_url = f"{GITLAB_URL}/api/v4/{endpoint}"
+    try:
+        response = requests.get(api_url, headers=headers, verify=False, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(
+            status_code=502, detail=f"Error al comunicar con GitLab API: {e}"
+        )
+
+
+# --- Endpoints del Portal de Documentación ---
+
+
+@app.get("/wiki/projects")
+async def list_wiki_projects():
+    """Devuelve SOLO los proyectos que tienen una wiki activa."""
+    if not PROJECTS:
+        return []
+
+    active_wiki_projects = []
+    print("\n--- [LOG] Verificando proyectos con Wikis activas (Método Robusto) ---")
+    for pid, pname in PROJECTS.items():
+        try:
+            # SSS: Nuevo método de detección. Hacemos un GET a la lista de páginas de la wiki.
+            # Si tiene éxito y devuelve una lista no vacía, la wiki existe.
+            response = gitlab_api_request("get", f"projects/{pid}/wikis")
+            # raise_for_status() ya fue llamado en gitlab_api_request
+
+            if response.json():  # Si la lista de páginas no está vacía
+                print(f"  - ✅ Encontrada Wiki activa en: '{pname}' (ID: {pid})")
+                active_wiki_projects.append({"id": pid, "name": pname})
+            else:
+                print(
+                    f"  - ❌ Omitiendo proyecto con Wiki vacía: '{pname}' (ID: {pid})"
+                )
+        except HTTPException as e:
+            # Capturamos el error si el proyecto no tiene wiki (devuelve 404) o hay otro problema
+            if e.status_code == 502:  # Error de conexión
+                print(f"  - ⚠️ Error de red para el proyecto: '{pname}' (ID: {pid})")
+            else:  # Otros errores de API, como 404
+                print(
+                    f"  - ❌ Omitiendo proyecto sin Wiki (o error de API): '{pname}' (ID: {pid})"
+                )
+
+    return active_wiki_projects
+
+
+@app.get("/wiki/projects/{project_id}/pages/tree")
+async def get_wiki_pages_tree(project_id: int) -> List[Dict[str, Any]]:
+    """Obtiene las páginas de la wiki y las devuelve como una estructura de árbol correcta."""
+    response = gitlab_api_request("get", f"projects/{project_id}/wikis")
+    pages = response.json()
+
+    # SSS: Lógica de construcción de árbol corregida y simplificada
+    tree = {}
+    for page in pages:
+        path = page["slug"].split("/")
+        current_level = tree
+        for i, part in enumerate(path):
+            if i == len(path) - 1:  # Es un archivo
+                current_level[part] = {
+                    "type": "file",
+                    "title": page["title"],
+                    "slug": page["slug"],
+                }
+            else:  # Es una carpeta
+                if part not in current_level:
+                    current_level[part] = {
+                        "type": "folder",
+                        "title": part,
+                        "children": {},
+                    }
+                current_level = current_level[part]["children"]
+
+    def dict_to_list_recursive(d: dict):
+        node_list = []
+        for key, value in d.items():
+            if value.get("children") is not None:
+                value["children"] = dict_to_list_recursive(value["children"])
+            node_list.append(value)
+        return node_list
+
+    return dict_to_list_recursive(tree)
+
+
+@app.get("/wiki/projects/{project_id}/generate_pdf/{slug:path}")
+async def generate_pdf_on_demand(project_id: int, slug: str):
+    """Genera un PDF usando un archivo temporal para satisfacer los requisitos de Pandoc."""
+    decoded_slug = unquote(slug)
+    page_data = gitlab_api_request(
+        "get", f"projects/{project_id}/wikis/{decoded_slug}"
+    ).json()
+    markdown_content = page_data.get("content")
+
+    if not markdown_content:
+        raise HTTPException(status_code=404, detail="No se encontró contenido.")
+
+    # SSS: Corrección Crítica - Usar un archivo temporal para la salida de Pandoc
+    # tempfile.NamedTemporaryFile crea un archivo seguro y lo elimina automáticamente al salir del bloque 'with'.
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as temp_pdf:
+        output_filename = temp_pdf.name
+        try:
+            pypandoc.convert_text(
+                markdown_content,
+                "pdf",
+                format="md",
+                outputfile=output_filename,  # Especificar el archivo de salida
+                extra_args=["--pdf-engine=xelatex"],
+            )
+
+            # Devolver el archivo generado usando FileResponse para un manejo eficiente
+            return FileResponse(
+                path=output_filename,
+                media_type="application/pdf",
+                filename=f"{decoded_slug.split('/')[-1]}.pdf",
+            )
+        except Exception as e:
+            error_message = f"Error de Pandoc: {str(e)}"
+            print(f"ERROR: Fallo al generar PDF para '{decoded_slug}': {error_message}")
+            raise HTTPException(status_code=500, detail=error_message)
+
+
+@app.get("/wiki/projects/{project_id}/pages")
+async def list_wiki_pages(project_id: int):
+    """Obtiene la lista de todas las páginas en la wiki de un proyecto."""
+    return gitlab_api_get(f"projects/{project_id}/wikis")
+
+
+@app.get("/wiki/projects/{project_id}/pages/{slug:path}")
+async def get_wiki_page_content(project_id: int, slug: str):
+    """Obtiene el contenido raw de una página de la wiki específica."""
+    # El slug llega codificado, lo decodificamos por si acaso
+    decoded_slug = unquote(slug)
+    page_data = gitlab_api_request(
+        "get", f"projects/{project_id}/wikis/{decoded_slug}"
+    ).json()
+    return {
+        "content": page_data.get("content", ""),
+        "title": page_data.get("title", ""),
+    }

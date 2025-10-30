@@ -8,7 +8,10 @@ import streamlit as st
 # --- Configuration ---
 API_BASE_URL = "http://backend:8001"
 st.set_page_config(
-    page_title="Task Dashboard", layout="wide", initial_sidebar_state="collapsed"
+    page_title="Task Dashboard",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="auto",
 )
 
 
