@@ -14,21 +14,37 @@ services:
       - app-network
     restart: unless-stopped
 
-  frontend:
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   container_name: gitlab_dashboard_frontend
+  #   volumes:
+  #     - ./frontend:/app
+  #   ports:
+  #     - "8501:8501"
+  #   depends_on:
+  #     - backend
+  #   networks:
+  #     - app-network
+  #   restart: unless-stopped
+
+  frontend-react:
     build:
-      context: ./frontend
+      context: ./frontend-react
       dockerfile: Dockerfile
-    container_name: gitlab_dashboard_frontend
-    volumes:
-      - ./frontend:/app
+    container_name: gitlab_dashboard_frontend_react
     ports:
-      - "8501:8501"
+      - "8503:80" # Exponemos el puerto 80 de Nginx al puerto 8503 de su máquina
     depends_on:
       - backend
     networks:
       - app-network
     restart: unless-stopped
-
+    # Para desarrollo, puede montar el volumen del código fuente:
+    volumes:
+      - ./frontend-react:/app
+      
 networks:
   app-network:
     driver: bridge

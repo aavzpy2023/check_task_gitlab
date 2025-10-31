@@ -2,15 +2,18 @@ import csv
 import os
 import tempfile
 from contextlib import asynccontextmanager
-from io import BytesIO
 from typing import Any, Dict, List
 from urllib.parse import unquote
 
 import pypandoc
 import requests
 import urllib3
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+
+# SSS: Importar BackgroundTasks para la limpieza segura de archivos
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+
+# SSS: Importar FileResponse para un envío de archivos eficiente
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -75,7 +78,9 @@ def load_projects_from_csv():
         )
 
 
-def gitlab_api_request(method: str, endpoint: str, **kwargs):
+def gitlab_api_request(
+    method: str, endpoint: str, raise_for_status: bool = True, **kwargs
+):
     if not PRIVATE_TOKEN:
         raise HTTPException(status_code=500, detail="GitLab token no configurado.")
     headers = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
@@ -84,12 +89,19 @@ def gitlab_api_request(method: str, endpoint: str, **kwargs):
         response = requests.request(
             method, api_url, headers=headers, verify=False, timeout=10, **kwargs
         )
-        if method.lower() != "head":
+        if raise_for_status:
             response.raise_for_status()
         return response
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.HTTPError as e:
+        # Errores de API (4xx, 5xx)
         raise HTTPException(
-            status_code=502, detail=f"Error al comunicar con GitLab API: {e}"
+            status_code=e.response.status_code,
+            detail=f"Error de GitLab API: {e.response.text}",
+        )
+    except requests.exceptions.RequestException as e:
+        # Errores de red/conexión
+        raise HTTPException(
+            status_code=502, detail=f"Error de red al comunicar con GitLab API: {e}"
         )
 
 
@@ -239,20 +251,24 @@ def gitlab_api_get(endpoint: str):
 
 @app.get("/wiki/projects")
 async def list_wiki_projects():
-    """Devuelve SOLO los proyectos que tienen una wiki activa."""
+    """Devuelve SOLO los proyectos que tienen una wiki con al menos una página."""
     if not PROJECTS:
         return []
 
     active_wiki_projects = []
-    print("\n--- [LOG] Verificando proyectos con Wikis activas (Método Robusto) ---")
+    print(
+        "\n--- [LOG] Verificando proyectos con Wikis activas (Método GET Robusto) ---"
+    )
     for pid, pname in PROJECTS.items():
         try:
-            # SSS: Nuevo método de detección. Hacemos un GET a la lista de páginas de la wiki.
-            # Si tiene éxito y devuelve una lista no vacía, la wiki existe.
-            response = gitlab_api_request("get", f"projects/{pid}/wikis")
-            # raise_for_status() ya fue llamado en gitlab_api_request
+            # SSS: Corrección Definitiva - Revertimos al método GET que sabemos que funciona.
+            # Pedimos la lista de páginas de la wiki.
+            response = gitlab_api_request(
+                "get", f"projects/{pid}/wikis", raise_for_status=True
+            )
 
-            if response.json():  # Si la lista de páginas no está vacía
+            # Si la llamada tiene éxito (no lanza excepción) y la lista de páginas no está vacía...
+            if response.json():
                 print(f"  - ✅ Encontrada Wiki activa en: '{pname}' (ID: {pid})")
                 active_wiki_projects.append({"id": pid, "name": pname})
             else:
@@ -260,90 +276,115 @@ async def list_wiki_projects():
                     f"  - ❌ Omitiendo proyecto con Wiki vacía: '{pname}' (ID: {pid})"
                 )
         except HTTPException as e:
-            # Capturamos el error si el proyecto no tiene wiki (devuelve 404) o hay otro problema
-            if e.status_code == 502:  # Error de conexión
-                print(f"  - ⚠️ Error de red para el proyecto: '{pname}' (ID: {pid})")
-            else:  # Otros errores de API, como 404
-                print(
-                    f"  - ❌ Omitiendo proyecto sin Wiki (o error de API): '{pname}' (ID: {pid})"
-                )
+            # Captura errores como 404 (el proyecto no tiene wiki) o 403.
+            print(
+                f"  - ❌ Omitiendo proyecto (API Error): '{pname}' (ID: {pid}, Detalle: {e.detail})"
+            )
 
     return active_wiki_projects
 
 
 @app.get("/wiki/projects/{project_id}/pages/tree")
 async def get_wiki_pages_tree(project_id: int) -> List[Dict[str, Any]]:
-    """Obtiene las páginas de la wiki y las devuelve como una estructura de árbol correcta."""
+    """Obtiene las páginas de la wiki y las devuelve como una estructura de árbol correcta y completa."""
     response = gitlab_api_request("get", f"projects/{project_id}/wikis")
+    if response.status_code != 200:
+        return []
     pages = response.json()
 
-    # SSS: Lógica de construcción de árbol corregida y simplificada
-    tree = {}
+    # SSS: Lógica de construcción de árbol final y robusta
+    tree_root = {}
     for page in pages:
-        path = page["slug"].split("/")
-        current_level = tree
-        for i, part in enumerate(path):
-            if i == len(path) - 1:  # Es un archivo
-                current_level[part] = {
-                    "type": "file",
-                    "title": page["title"],
-                    "slug": page["slug"],
-                }
-            else:  # Es una carpeta
-                if part not in current_level:
-                    current_level[part] = {
-                        "type": "folder",
-                        "title": part,
-                        "children": {},
-                    }
-                current_level = current_level[part]["children"]
+        path_parts = page["slug"].split("/")
+        current_level = tree_root
 
-    def dict_to_list_recursive(d: dict):
+        for part in path_parts[:-1]:  # Navegar o crear carpetas
+            if part not in current_level:
+                current_level[part] = {"type": "folder", "title": part, "children": {}}
+            current_level = current_level[part]["children"]
+
+        # Añadir el archivo al nivel actual
+        file_name = path_parts[-1]
+        current_level[file_name] = {
+            "type": "file",
+            "title": page["title"],
+            "slug": page["slug"],
+        }
+
+    def convert_tree_to_list(tree_dict: dict):
+        """Convierte recursivamente los diccionarios del árbol a listas ordenadas."""
         node_list = []
-        for key, value in d.items():
-            if value.get("children") is not None:
-                value["children"] = dict_to_list_recursive(value["children"])
-            node_list.append(value)
+        for key, node in tree_dict.items():
+            if node["type"] == "folder":
+                node["children"] = convert_tree_to_list(node["children"])
+                # Ordenar hijos: carpetas primero, luego archivos por título
+                node["children"].sort(key=lambda x: (x["type"] != "folder", x["title"]))
+            node_list.append(node)
         return node_list
 
-    return dict_to_list_recursive(tree)
+    final_list = convert_tree_to_list(tree_root)
+    # Ordenar el nivel raíz: carpetas primero, luego archivos por título
+    final_list.sort(key=lambda x: (x["type"] != "folder", x["title"]))
+
+    return final_list
 
 
 @app.get("/wiki/projects/{project_id}/generate_pdf/{slug:path}")
-async def generate_pdf_on_demand(project_id: int, slug: str):
-    """Genera un PDF usando un archivo temporal para satisfacer los requisitos de Pandoc."""
+async def generate_pdf_on_demand(
+    project_id: int, slug: str, background_tasks: BackgroundTasks
+):
+    """
+    Genera un PDF usando un archivo temporal y una tarea en segundo plano
+    para una limpieza segura y sin condiciones de carrera.
+    """
     decoded_slug = unquote(slug)
     page_data = gitlab_api_request(
         "get", f"projects/{project_id}/wikis/{decoded_slug}"
     ).json()
+    project_data = gitlab_api_request("get", f"projects/{project_id}").json()
+
     markdown_content = page_data.get("content")
+    project_web_url = project_data.get("web_url")
 
     if not markdown_content:
         raise HTTPException(status_code=404, detail="No se encontró contenido.")
 
-    # SSS: Corrección Crítica - Usar un archivo temporal para la salida de Pandoc
-    # tempfile.NamedTemporaryFile crea un archivo seguro y lo elimina automáticamente al salir del bloque 'with'.
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as temp_pdf:
-        output_filename = temp_pdf.name
-        try:
-            pypandoc.convert_text(
-                markdown_content,
-                "pdf",
-                format="md",
-                outputfile=output_filename,  # Especificar el archivo de salida
-                extra_args=["--pdf-engine=xelatex"],
-            )
+    if project_web_url:
+        base_wiki_url = f"{project_web_url}/-/wikis/"
+        markdown_content = markdown_content.replace(
+            'src="uploads/', f'src="{base_wiki_url}uploads/'
+        )
+        markdown_content = markdown_content.replace(
+            "(uploads/", f"({base_wiki_url}uploads/"
+        )
 
-            # Devolver el archivo generado usando FileResponse para un manejo eficiente
-            return FileResponse(
-                path=output_filename,
-                media_type="application/pdf",
-                filename=f"{decoded_slug.split('/')[-1]}.pdf",
-            )
-        except Exception as e:
-            error_message = f"Error de Pandoc: {str(e)}"
-            print(f"ERROR: Fallo al generar PDF para '{decoded_slug}': {error_message}")
-            raise HTTPException(status_code=500, detail=error_message)
+    # SSS: Corrección Crítica - Usar un archivo temporal que controlamos manualmente
+    temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    output_filename = temp_pdf.name
+    temp_pdf.close()
+
+    try:
+        pypandoc.convert_text(
+            markdown_content,
+            "pdf",
+            format="md",
+            outputfile=output_filename,  # Especificar el archivo de salida
+            extra_args=["--pdf-engine=xelatex"],
+        )
+
+        # Añadir la tarea de limpieza. Se ejecutará DESPUÉS de que la respuesta se envíe.
+        background_tasks.add_task(os.remove, output_filename)
+
+        return FileResponse(
+            path=output_filename,
+            media_type="application/pdf",
+            filename=f"{decoded_slug.split('/')[-1]}.pdf",
+        )
+    except Exception as e:
+        error_message = f"Error de Pandoc: {str(e)}"
+        print(f"ERROR: Fallo al generar PDF para '{decoded_slug}': {error_message}")
+        os.remove(output_filename)  # Limpieza en caso de error
+        raise HTTPException(status_code=500, detail=error_message)
 
 
 @app.get("/wiki/projects/{project_id}/pages")
