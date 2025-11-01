@@ -1,5 +1,4 @@
 services:
-
   nginx:
     build:
       context: ./nginx
@@ -48,7 +47,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "${POSTGRES_PORT}:5432"
-    # SSS: Aseguramos que la base de datos se una explícitamente a la red
     networks:
       - app-network
     volumes:
