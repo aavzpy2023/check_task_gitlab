@@ -31,7 +31,7 @@ services:
   frontend-react:
     build:
       context: ./frontend-react
-    container_name: gitlab_dashboard_frontend_dev
+    container_name: gitlab_dashboard_frontend_react
     volumes:
       - ./frontend-react:/app
       - /app/node_modules
