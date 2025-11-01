@@ -1,25 +1,30 @@
-# backend/main.py
-# SSS v4.2.0 - Backend de Producción v4.2 (Limpio y Desduplicado)
-
-import csv
 import os
 import sys
 import tempfile
+import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List
-from urllib.parse import unquote
+from threading import Thread
+from typing import Any, Dict, List, Optional
 
+import pandas as pd
 import pypandoc
 import requests
 import urllib3
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from sqlalchemy import BigInteger, Column, DateTime, create_engine
+from pydantic import BaseModel, Field
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    DateTime,
+    ForeignKey,
+    String,
+    create_engine,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -27,9 +32,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 GITLAB_URL = os.getenv("GITLAB_URL")
 PRIVATE_TOKEN = os.getenv("GITLAB_TOKEN")
 LABEL_TO_TRACK = "PARA REVISIÓN"
-PROJECTS: dict[str, str] = {}
-
 DATABASE_URL = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@postgres_chatbot:5432/{os.getenv('POSTGRES_DB')}"
+SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", 600))
+PROJECTS_CSV_PATH = "./projects.csv"
 
 # --- SQLAlchemy Setup ---
 engine = create_engine(DATABASE_URL)
@@ -37,31 +42,124 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-# --- Modelos ---
+# --- Modelos SQLAlchemy (sin cambios) ---
+class MonitoredProject(Base):
+    __tablename__ = "monitored_projects"
+    project_id = Column(BigInteger, primary_key=True, index=True)
+    project_name = Column(String(255), nullable=False)
+
+
 class GitLabTaskDB(Base):
     __tablename__ = "gitlab_tasks"
     task_id = Column(BigInteger, primary_key=True)
-    project_id = Column(BigInteger, nullable=False, index=True)
+    project_id = Column(
+        BigInteger,
+        ForeignKey("monitored_projects.project_id"),
+        nullable=False,
+        index=True,
+    )
     updated_at = Column(DateTime(timezone=True))
     raw_data = Column(JSONB)
 
 
+# --- Modelos Pydantic (sin cambios) ---
+
+
+class TimeStats(BaseModel):
+    human_time_estimate: Optional[str] = None
+    human_total_time_spent: Optional[str] = None
+
+
 class Task(BaseModel):
     title: str
-    description: str | None
+    description: Optional[str]
     author: str
     url: str
-    assignee: str | None
-    milestone: str | None
+    assignee: Optional[str]
+    milestone: Optional[str]
+    created_at: Optional[str] = None
+    labels: List[str] = []
+    time_stats: TimeStats = Field(default_factory=TimeStats)
 
 
 class ProjectSummary(BaseModel):
-    id: str
+    id: int
     name: str
     review_task_count: int
 
 
-# --- Lógica de la API de GitLab (ÚNICA FUNCIÓN) ---
+# --- SSS: LÓGICA DE SINCRONIZACIÓN AUTOMÁTICA ---
+def sync_all_projects_periodically(interval_seconds: int):
+    """Esta función se ejecuta en un hilo de fondo de forma continua."""
+    while True:
+        print(
+            f"--- [SYNC THREAD] Iniciando ciclo de sincronización a las {time.ctime()} ---"
+        )
+        db = SessionLocal()
+        try:
+            projects = db.query(MonitoredProject).all()
+            if not projects:
+                print(
+                    "--- [SYNC THREAD] No hay proyectos monitoreados para sincronizar."
+                )
+            else:
+                print(f"--- [SYNC THREAD] Se sincronizarán {len(projects)} proyectos.")
+                for project in projects:
+                    sync_single_project(project.project_id, db)
+        except Exception as e:
+            print(
+                f"--- [SYNC THREAD] 🚨 ERROR CRÍTICO durante el ciclo de sincronización: {e}"
+            )
+        finally:
+            db.close()
+        print(
+            f"--- [SYNC THREAD] Ciclo completado. Esperando {interval_seconds} segundos. ---"
+        )
+        time.sleep(interval_seconds)
+
+
+def sync_single_project(project_id: int, db: Session):
+    try:
+        tasks_json = gitlab_api_request(
+            "get",
+            f"projects/{project_id}/issues?labels={LABEL_TO_TRACK}&state=opened&per_page=100",
+        ).json()
+        db.query(GitLabTaskDB).filter(GitLabTaskDB.project_id == project_id).delete(
+            synchronize_session=False
+        )
+        if not tasks_json:
+            db.commit()
+            print(
+                f"--- [SYNC] ✅ Proyecto {project_id}: No se encontraron tareas. BD actualizada."
+            )
+            return {
+                "message": "No se encontraron tareas en revisión. La base de datos ha sido actualizada."
+            }
+        tasks_to_insert = [
+            {
+                "task_id": t["id"],
+                "project_id": t["project_id"],
+                "updated_at": t["updated_at"],
+                "raw_data": t,
+            }
+            for t in tasks_json
+        ]
+        if tasks_to_insert:
+            db.execute(pg_insert(GitLabTaskDB).values(tasks_to_insert))
+        db.commit()
+        print(
+            f"--- [SYNC] ✅ Proyecto {project_id}: Sincronización exitosa. {len(tasks_to_insert)} tareas procesadas."
+        )
+        return {
+            "message": f"Sincronización exitosa. {len(tasks_to_insert)} tareas procesadas."
+        }
+    except Exception as e:
+        print(f"--- [SYNC] 🚨 FALLO para proyecto {project_id}: {e}")
+        db.rollback()
+        return {"message": f"Fallo al sincronizar proyecto {project_id}."}
+
+
+# --- Lógica API GitLab & Dependencias (sin cambios) ---
 def gitlab_api_request(
     method: str, endpoint: str, raise_for_status: bool = True, **kwargs
 ) -> requests.Response:
@@ -85,7 +183,6 @@ def gitlab_api_request(
         raise HTTPException(status_code=502, detail=f"Error de red: {e}")
 
 
-# --- Dependency Injection y Lifespan ---
 def get_db():
     db = SessionLocal()
     try:
@@ -94,76 +191,113 @@ def get_db():
         db.close()
 
 
-def load_projects_from_csv():
-    global PROJECTS
-    try:
-        with open("projects.csv", mode="r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            PROJECTS = {
-                row["project_id"].strip(): row["project_name"].strip() for row in reader
-            }
-            print(f"✅ Proyectos cargados desde CSV: {len(PROJECTS)} encontrados.")
-    except Exception as e:
-        print(f"🚨 ADVERTENCIA: No se pudo leer 'projects.csv'. Error: {e}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("--- [STARTUP] Verificando conexión a BD y cargando proyectos... ---")
+    print("--- [STARTUP] Iniciando ciclo de vida de la aplicación... ---")
+    db = SessionLocal()
     try:
-        with engine.connect():
-            print("✅ Conexión a la base de datos establecida.")
-    except Exception as e:
-        print(
-            f"🚨 FATAL: No se pudo conectar a la base de datos. El servicio se detendrá. Error: {e}"
+        print("--- [STARTUP] Verificando y creando esquema de base de datos...")
+        Base.metadata.create_all(bind=engine)
+        print("--- [STARTUP] ✅ Esquema de BD verificado.")
+
+        # SSS: LÓGICA DE AUTO-POBLACIÓN IDEMPOTENTE (AHORA CON PANDAS)
+        if db.query(MonitoredProject).count() == 0:
+            print(
+                "--- [STARTUP] ℹ️ La tabla de proyectos está vacía. Intentando auto-poblar desde 'projects.csv'..."
+            )
+            if not os.path.exists(PROJECTS_CSV_PATH):
+                print(
+                    f"--- [STARTUP] ⚠️ ADVERTENCIA: No se encontró '{PROJECTS_CSV_PATH}'."
+                )
+            else:
+                try:
+                    df = pd.read_csv(PROJECTS_CSV_PATH)
+                    projects_to_add = [
+                        MonitoredProject(
+                            project_id=int(row.project_id),
+                            project_name=str(row.project_name).strip(),
+                        )
+                        for row in df.itertuples(index=False)
+                    ]
+                    db.add_all(projects_to_add)
+                    db.commit()
+                    print(
+                        f"--- [STARTUP] ✅ Se poblaron {len(projects_to_add)} proyectos desde el CSV usando Pandas."
+                    )
+                except Exception as e:
+                    print(
+                        f"--- [STARTUP] 🚨 ERROR al leer o procesar CSV con Pandas: {e}"
+                    )
+                    db.rollback()
+        else:
+            print(
+                "--- [STARTUP] ℹ️ La base de datos ya contiene proyectos. Saltando la fase de población."
+            )
+
+        print("--- [STARTUP] Iniciando hilo de sincronización en segundo plano...")
+        sync_thread = Thread(
+            target=sync_all_projects_periodically,
+            args=(SYNC_INTERVAL_SECONDS,),
+            daemon=True,
         )
-        sys.exit(1)
-    load_projects_from_csv()
+        sync_thread.start()
+        print("--- [STARTUP] ✅ Hilo de sincronización iniciado.")
+    except Exception as e:
+        print(f"🚨 FATAL durante el arranque: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
     yield
+    print("--- [SHUTDOWN] La aplicación se está apagando. ---")
 
 
+# SSS: root_path gestiona el prefijo /api. Los decoradores NO deben incluirlo.
 app = FastAPI(
-    title="Portal de Documentación y Tareas API",
-    version="4.4.0",
-    lifespan=lifespan,
-    root_path="/api",
+    title="Portal API v5.3", version="5.3.0", lifespan=lifespan, root_path="/api"
 )
 
-# === API Endpoints ===
-
-
-# --- Endpoints del Dashboard de Tareas ---
-@app.get("/api/projects/", response_model=List[ProjectSummary], tags=["Task Dashboard"])
-def get_projects_summary():
-    if not PROJECTS:
-        return []
-    summary_list = []
-    for pid, pname in PROJECTS.items():
-        try:
-            issues = gitlab_api_request(
-                "get", f"projects/{pid}/issues?labels={LABEL_TO_TRACK}&state=opened"
-            ).json()
-            summary_list.append(
-                ProjectSummary(id=pid, name=pname, review_task_count=len(issues))
-            )
-        except:
-            summary_list.append(ProjectSummary(id=pid, name=pname, review_task_count=0))
-    return summary_list
+# === NUEVOS Endpoints del Dashboard (desde BD) ===
 
 
 @app.get(
-    "/api/projects/{project_id}/review_tasks/",
-    response_model=List[Task],
-    tags=["Task Dashboard"],
+    "/projects/active_from_db",
+    response_model=List[ProjectSummary],
+    tags=["Task Dashboard (DB)"],
 )
-def get_project_review_tasks(project_id: str):
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Proyecto no encontrado.")
-    issues = gitlab_api_request(
-        "get", f"projects/{project_id}/issues?labels={LABEL_TO_TRACK}&state=opened"
-    ).json()
+def get_active_projects_from_db(db: Session = Depends(get_db)):
+    results = (
+        db.query(
+            MonitoredProject.project_id,
+            MonitoredProject.project_name,
+            func.count(GitLabTaskDB.task_id).label("task_count"),
+        )
+        .join(GitLabTaskDB, MonitoredProject.project_id == GitLabTaskDB.project_id)
+        .group_by(MonitoredProject.project_id, MonitoredProject.project_name)
+        .having(func.count(GitLabTaskDB.task_id) > 0)
+        .order_by(func.count(GitLabTaskDB.task_id).desc())
+        .all()
+    )
+    return [
+        ProjectSummary(id=pid, name=pname, review_task_count=count)
+        for pid, pname, count in results
+    ]
+
+
+@app.get(
+    "/projects/{project_id}/tasks_from_db",
+    response_model=List[Task],
+    tags=["Task Dashboard (DB)"],
+)
+def get_project_tasks_from_db(project_id: int, db: Session = Depends(get_db)):
+    db_tasks = (
+        db.query(GitLabTaskDB).filter(GitLabTaskDB.project_id == project_id).all()
+    )
+    if not db_tasks:
+        return []
     task_list = []
-    for issue in issues:
+    for db_task in db_tasks:
+        issue = db_task.raw_data
         assignee = issue["assignees"][0].get("name") if issue.get("assignees") else None
         milestone = issue["milestone"].get("title") if issue.get("milestone") else None
         task_list.append(
@@ -179,18 +313,36 @@ def get_project_review_tasks(project_id: str):
     return task_list
 
 
-# --- Endpoint de Sincronización con BD ---
-@app.post("/api/sync/project/{project_id}", status_code=200, tags=["Database Sync"])
-def sync_project_tasks(
-    project_id: str, db: Session = Depends(get_db)
-):  # Tipo corregido a str
-    tasks = gitlab_api_request(
-        "get",
-        f"projects/{project_id}/issues?labels={LABEL_TO_TRACK}&state=opened&per_page=100",
-    ).json()
+# === Endpoints de Sincronización y Gestión ===
+
+
+@app.post("/sync/project/{project_id}", status_code=200, tags=["Database Sync"])
+def sync_project_tasks(project_id: int, db: Session = Depends(get_db)):
+    try:
+        tasks = gitlab_api_request(
+            "get",
+            f"projects/{project_id}/issues?labels={LABEL_TO_TRACK}&state=opened&per_page=100",
+        ).json()
+    except HTTPException as e:
+        print(
+            f"ADVERTENCIA: No se pudo obtener tareas para el proyecto {project_id}. Razón: {e.detail}"
+        )
+        db.query(GitLabTaskDB).filter(GitLabTaskDB.project_id == project_id).delete(
+            synchronize_session=False
+        )
+        db.commit()
+        return {
+            "message": f"No se pudieron obtener tareas para el proyecto {project_id}. Limpiando de la BD."
+        }
+    db.query(GitLabTaskDB).filter(GitLabTaskDB.project_id == project_id).delete(
+        synchronize_session=False
+    )
     if not tasks:
-        return {"message": "No se encontraron tareas."}
-    tasks_to_upsert = [
+        db.commit()
+        return {
+            "message": "No se encontraron tareas en revisión. La base de datos ha sido actualizada."
+        }
+    tasks_to_insert = [
         {
             "task_id": t["id"],
             "project_id": t["project_id"],
@@ -199,125 +351,34 @@ def sync_project_tasks(
         }
         for t in tasks
     ]
-    stmt = pg_insert(GitLabTaskDB).values(tasks_to_upsert)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["task_id"],
-        set_={
-            "updated_at": stmt.excluded.updated_at,
-            "raw_data": stmt.excluded.raw_data,
-        },
-    )
-    db.execute(stmt)
+    if tasks_to_insert:
+        db.execute(pg_insert(GitLabTaskDB).values(tasks_to_insert))
     db.commit()
     return {
-        "message": f"Sincronización exitosa. {len(tasks_to_upsert)} tareas procesadas."
+        "message": f"Sincronización exitosa. {len(tasks_to_insert)} tareas procesadas."
     }
 
 
-# --- Endpoints del Portal de Documentación ---
-@app.get("/api/wiki/projects", tags=["Documentation Portal"])
-def list_wiki_projects():
-    if not PROJECTS:
-        return []
-    active_wikis = []
-    for pid, pname in PROJECTS.items():
-        try:
-            resp = gitlab_api_request(
-                "head", f"projects/{pid}/wikis/home", raise_for_status=False
-            )
-            if resp.status_code == 200:
-                active_wikis.append({"id": pid, "name": pname})
-        except:
-            continue
-    return active_wikis
+@app.get("/monitored_projects", tags=["Project Management"])
+def get_monitored_projects(db: Session = Depends(get_db)):
+    return db.query(MonitoredProject).order_by(MonitoredProject.project_name).all()
 
 
-@app.get("/api/wiki/projects/{project_id}/pages/tree", tags=["Documentation Portal"])
-def get_wiki_pages_tree(project_id: str):  # Tipo corregido a str
-    response = gitlab_api_request("get", f"projects/{project_id}/wikis")
-    pages = response.json()
-    tree_root = {}
-    for page in pages:
-        path_parts = page["slug"].split("/")
-        current_level = tree_root
-        for part in path_parts[:-1]:
-            if part not in current_level:
-                current_level[part] = {"type": "folder", "title": part, "children": {}}
-            current_level = current_level[part]["children"]
-        file_name = path_parts[-1]
-        current_level[file_name] = {
-            "type": "file",
-            "title": page["title"],
-            "slug": page["slug"],
-        }
-
-    def convert_tree_to_list(tree_dict: dict):
-        node_list = []
-        for key, node in tree_dict.items():
-            if node["type"] == "folder":
-                node["children"] = convert_tree_to_list(node["children"])
-                node["children"].sort(key=lambda x: (x["type"] != "folder", x["title"]))
-            node_list.append(node)
-        return node_list
-
-    final_list = convert_tree_to_list(tree_root)
-    final_list.sort(key=lambda x: (x["type"] != "folder", x["title"]))
-    return final_list
-
-
-@app.get(
-    "/api/wiki/projects/{project_id}/pages/{slug:path}", tags=["Documentation Portal"]
-)
-def get_wiki_page_content(project_id: str, slug: str):  # Tipo corregido a str
-    decoded_slug = unquote(slug)
-    page_data = gitlab_api_request(
-        "get", f"projects/{project_id}/wikis/{decoded_slug}"
-    ).json()
-    return {
-        "content": page_data.get("content", ""),
-        "title": page_data.get("title", ""),
-    }
-
-
-@app.get(
-    "/api/wiki/projects/{project_id}/generate_pdf/{slug:path}",
-    tags=["Documentation Portal"],
-)
-def generate_pdf_on_demand(
-    project_id: str, slug: str, background_tasks: BackgroundTasks
-):  # Tipo corregido a str
-    decoded_slug = unquote(slug)
-    page_data = gitlab_api_request(
-        "get", f"projects/{project_id}/wikis/{decoded_slug}"
-    ).json()
-    project_data = gitlab_api_request("get", f"projects/{project_id}").json()
-    markdown_content = page_data.get("content")
-    project_web_url = project_data.get("web_url")
-    if not markdown_content:
-        raise HTTPException(status_code=404, detail="No se encontró contenido.")
-    if project_web_url:
-        base_wiki_url = f"{project_web_url}/-/wikis/"
-        markdown_content = markdown_content.replace(
-            'src="uploads/', f'src="{base_wiki_url}uploads/'
-        ).replace("(uploads/", f"({base_wiki_url}uploads/")
-    temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-    output_filename = temp_pdf.name
-    temp_pdf.close()
-    try:
-        pypandoc.convert_text(
-            markdown_content,
-            "pdf",
-            format="md",
-            outputfile=output_filename,
-            extra_args=["--pdf-engine=xelatex"],
+@app.post("/monitored_projects", status_code=201, tags=["Project Management"])
+def add_monitored_project(
+    project_id: int, project_name: str, db: Session = Depends(get_db)
+):
+    existing_project = (
+        db.query(MonitoredProject)
+        .filter(MonitoredProject.project_id == project_id)
+        .first()
+    )
+    if existing_project:
+        raise HTTPException(
+            status_code=409, detail="El proyecto ya está siendo monitoreado."
         )
-        background_tasks.add_task(os.remove, output_filename)
-        return FileResponse(
-            path=output_filename,
-            media_type="application/pdf",
-            filename=f"{decoded_slug.split('/')[-1]}.pdf",
-        )
-    except Exception as e:
-        print(f"ERROR: Fallo al generar PDF para '{decoded_slug}': {str(e)}")
-        os.remove(output_filename)
-        raise HTTPException(status_code=500, detail=f"Error de Pandoc: {str(e)}")
+    new_project = MonitoredProject(project_id=project_id, project_name=project_name)
+    db.add(new_project)
+    db.commit()
+    db.refresh(new_project)
+    return new_project

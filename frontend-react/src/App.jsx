@@ -1,48 +1,88 @@
-// frontend-react/src/App.jsx
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
-import './App.css';
+import { getActiveProjects, getTasksForProject } from './services/api';
+import ProjectList from './components/ProjectList';
+import TaskDetails from './components/TaskDetails';
+import './App.css'; // Archivo principal de estilos
 
 function App() {
   const [projects, setProjects] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [selectedProject, setSelectedProject] = useState({ id: null, name: '' });
+  const [tasks, setTasks] = useState([]);
+  const [isLoadingTasks, setIsLoadingTasks] = useState(false);
+  const [error, setError] = useState('');
 
+  // Efecto para cargar la lista de proyectos al montar el componente
   useEffect(() => {
-    // La llamada a la API ahora se hace a una ruta relativa.
-    // Nginx se encargará de redirigirla al backend.
-    axios.get('/api/wiki/projects')
-      .then(response => {
-        setProjects(response.data);
-        setLoading(false);
-      })
-      .catch(error => {
-        console.error("Error fetching projects:", error);
-        setError("No se pudieron cargar los proyectos. Verifique la consola del navegador y los logs del backend.");
-        setLoading(false);
-      });
-  }, []); // El array vacío asegura que esto se ejecute solo una vez
+    const fetchProjects = async () => {
+      try {
+        const activeProjects = await getActiveProjects();
+        setProjects(activeProjects);
+        // Si hay proyectos, selecciona el primero por defecto
+        if (activeProjects && activeProjects.length > 0) {
+          setSelectedProject({ id: activeProjects[0].id, name: activeProjects[0].name });
+        }
+      } catch (err) {
+        setError('No se pudo cargar la lista de proyectos.');
+      }
+    };
+    fetchProjects();
+  }, []); // El array vacío asegura que se ejecute solo una vez
+
+  // Efecto para cargar las tareas cuando cambia el proyecto seleccionado
+  useEffect(() => {
+    const fetchTasks = async () => {
+      if (!selectedProject.id) return;
+      setIsLoadingTasks(true);
+      setError('');
+      try {
+        const projectTasks = await getTasksForProject(selectedProject.id);
+        setTasks(projectTasks);
+      } catch (err) {
+        setError(`No se pudieron cargar las tareas para ${selectedProject.name}.`);
+      } finally {
+        setIsLoadingTasks(false);
+      }
+    };
+    fetchTasks();
+  }, [selectedProject.id]); // Se ejecuta cada vez que selectedProject.id cambia
+
+  const handleSelectProject = (projectId, projectName) => {
+    setSelectedProject({ id: projectId, name: projectName });
+  };
+
+  if (error && projects.length === 0) {
+    return <div className="container error-message">{error}</div>;
+  }
+  
+  if (projects.length === 0 && !error) {
+      return (
+        <div className="container success-message">
+            <h1>🎉 ¡Excelente trabajo!</h1>
+            <p>No hay tareas en revisión en ningún proyecto monitoreado.</p>
+        </div>
+      );
+  }
 
   return (
-    <div className="app-container">
+    <div className="container">
       <header>
-        <h1>📖 Portal de Documentación y Tareas</h1>
+        <h1>📈 Dashboard de Tareas en Revisión</h1>
       </header>
-      <main>
-        <h2>Proyectos con Wiki Activa</h2>
-        {loading && <p>Cargando proyectos...</p>}
-        {error && <p className="error">{error}</p>}
-        <ul>
-          {projects.map(project => (
-            <li key={project.id}>{project.name} (ID: {project.id})</li>
-          ))}
-        </ul>
-        <hr />
-        <p>
-          <a href="/api/docs" target="_blank" rel="noopener noreferrer">
-            Probar la documentación de la API (Swagger UI)
-          </a>
-        </p>
+      <main className="dashboard-layout">
+        <aside className="left-panel">
+          <ProjectList
+            projects={projects}
+            selectedProjectId={selectedProject.id}
+            onSelectProject={handleSelectProject}
+          />
+        </aside>
+        <section className="right-panel">
+          <TaskDetails
+            tasks={tasks}
+            projectName={selectedProject.name}
+            isLoading={isLoadingTasks}
+          />
+        </section>
       </main>
     </div>
   );

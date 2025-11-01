@@ -1,15 +1,26 @@
 services:
+
+  nginx:
+    build:
+      context: ./nginx
+    container_name: main_proxy
+    ports:
+      - "8503:80"
+    networks:
+      - app-network
+    depends_on:
+      - backend
+      - frontend-react
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
     container_name: gitlab_dashboard_backend
     volumes:
       - ./backend:/app
     env_file:
       - .env
-    expose:
-      - "8001" # No se mapea al host, solo se expone a la red interna
     networks:
       - app-network
     depends_on:
@@ -20,12 +31,10 @@ services:
   frontend-react:
     build:
       context: ./frontend-react
-      dockerfile: Dockerfile
-    container_name: gitlab_dashboard_frontend_react
-    ports:
-      - "8503:80"
-    depends_on:
-      - backend
+    container_name: gitlab_dashboard_frontend_dev
+    volumes:
+      - ./frontend-react:/app
+      - /app/node_modules
     networks:
       - app-network
     restart: unless-stopped
@@ -44,7 +53,7 @@ services:
       - app-network
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql
+      - ./postgres/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s

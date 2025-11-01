@@ -1,0 +1,30 @@
+.task-extended-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    font-size: 0.9rem;
+    color: #6c757d;
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px dashed #ced4da;
+  }
+  
+  .task-labels {
+    margin-top: 0.75rem;
+  }
+  
+  .task-label {
+    display: inline-block;
+    padding: 0.25em 0.6em;
+    font-size: 75%;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
+    white-space: nowrap;
+    vertical-align: baseline;
+    border-radius: 0.25rem;
+    background-color: #e9ecef;
+    color: #495057;
+    margin-right: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
