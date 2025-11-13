@@ -1,8 +1,9 @@
+// ./frontend-react/src/services/api.js
 import axios from 'axios';
 
-// La URL base apunta al path que Nginx redirige al backend.
+// SSS: Actualización del baseURL para que coincida con la nueva ruta de la API expuesta por Nginx.
 const apiClient = axios.create({
-  baseURL: '/api',
+  baseURL: '/tareas/api',
 });
 
 /**
@@ -15,7 +16,7 @@ export const getActiveProjects = async () => {
     return response.data;
   } catch (error) {
     console.error("Error fetching active projects:", error);
-    throw error; // Propagar el error para que el componente lo maneje
+    throw error;
   }
 };
 
@@ -25,7 +26,7 @@ export const getActiveProjects = async () => {
  * @returns {Promise<Array>} Una promesa que resuelve a un array de tareas.
  */
 export const getTasksForProject = async (projectId) => {
-  if (!projectId) return []; // No hacer la llamada si no hay ID
+  if (!projectId) return [];
   try {
     const response = await apiClient.get(`/projects/${projectId}/tasks_from_db`);
     return response.data;

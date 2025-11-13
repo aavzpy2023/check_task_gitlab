@@ -1,7 +1,8 @@
 services:
   nginx:
-    build:
-      context: ./nginx
+    # build:
+    #   context: ./nginx
+    image: nginx:latest
     container_name: main_proxy
     ports:
       - "8503:80"
@@ -11,6 +12,8 @@ services:
       - backend
       - frontend-react
     restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
 
   backend:
     build:
