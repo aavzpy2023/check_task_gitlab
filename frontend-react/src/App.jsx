@@ -1,89 +1,174 @@
+// ./frontend-react/src/App.jsx
 import React, { useState, useEffect } from 'react';
-import { getActiveProjects, getTasksForProject } from './services/api';
+import { getActiveProjects, getAllTasksByLabel, forceSyncAll, getLastSyncTime, getSyncStatus } from './services/api';
 import ProjectList from './components/ProjectList';
 import TaskDetails from './components/TaskDetails';
-import './App.css'; // Archivo principal de estilos
+import './App.css';
+
+const TABS = {
+  'Ejecución': 'En Ejecucion',
+  'Revisión': 'PARA REVISIÓN',
+  'Rev. Funcional': 'Revision Funcional',
+};
 
 function App() {
   const [projects, setProjects] = useState([]);
-  const [selectedProject, setSelectedProject] = useState({ id: null, name: '' });
   const [tasks, setTasks] = useState([]);
-  const [isLoadingTasks, setIsLoadingTasks] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
+  const [activeTab, setActiveTab] = useState(TABS['Revisión']);
+  const [selectedProjectId, setSelectedProjectId] = useState(null);
+  const [lastSyncTime, setLastSyncTime] = useState(null);
+  const [isBackendSyncing, setIsBackendSyncing] = useState(false);
 
-  // Efecto para cargar la lista de proyectos al montar el componente
+  const fetchData = async () => {
+    setIsLoading(true);
+    setError('');
+    try {
+      const [projectsData, tasksData, syncTimeData] = await Promise.all([
+        getActiveProjects(activeTab),
+        getAllTasksByLabel(activeTab),
+        getLastSyncTime()
+      ]);
+      
+      setProjects(projectsData);
+      setTasks(tasksData);
+      setLastSyncTime(syncTimeData.last_sync_time);
+      
+    } catch (err) {
+      console.error("Error en fetchData:", err);
+      setError(`Fallo al cargar los datos. Verifique la conexión con la API.`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  // Hook para polling de estado
   useEffect(() => {
-    const fetchProjects = async () => {
+    const pollSyncStatus = async () => {
       try {
-        const activeProjects = await getActiveProjects();
-        setProjects(activeProjects);
-        // Si hay proyectos, selecciona el primero por defecto
-        if (activeProjects && activeProjects.length > 0) {
-          setSelectedProject({ id: activeProjects[0].id, name: activeProjects[0].name });
+        const status = await getSyncStatus();
+        const isCurrentlySyncing = status.is_syncing;
+        if (isBackendSyncing && !isCurrentlySyncing) {
+          fetchData();
         }
-      } catch (err) {
-        setError('No se pudo cargar la lista de proyectos.');
+        setIsBackendSyncing(isCurrentlySyncing);
+      } catch (pollError) {
+        console.error("Error en el polling de estado de sincronización:", pollError);
+        setIsBackendSyncing(false);
       }
     };
-    fetchProjects();
-  }, []); // El array vacío asegura que se ejecute solo una vez
+    pollSyncStatus();
+    const intervalId = setInterval(pollSyncStatus, 3000);
+    return () => clearInterval(intervalId);
+  }, [isBackendSyncing]);
 
-  // Efecto para cargar las tareas cuando cambia el proyecto seleccionado
+  // Hook para cargar datos cuando cambia la pestaña
   useEffect(() => {
-    const fetchTasks = async () => {
-      if (!selectedProject.id) return;
-      setIsLoadingTasks(true);
-      setError('');
-      try {
-        const projectTasks = await getTasksForProject(selectedProject.id);
-        setTasks(projectTasks);
-      } catch (err) {
-        setError(`No se pudieron cargar las tareas para ${selectedProject.name}.`);
-      } finally {
-        setIsLoadingTasks(false);
-      }
-    };
-    fetchTasks();
-  }, [selectedProject.id]); // Se ejecuta cada vez que selectedProject.id cambia
+    fetchData();
+  }, [activeTab]);
 
-  const handleSelectProject = (projectId, projectName) => {
-    setSelectedProject({ id: projectId, name: projectName });
+  // SSS: CORRECCIÓN DE UX FINAL
+  // Este nuevo hook se ejecuta DESPUÉS de que los proyectos han sido actualizados
+  useEffect(() => {
+    if (projects && projects.length > 0) {
+      setSelectedProjectId(projects[0].id); // Seleccionar siempre el primer proyecto
+    } else {
+      setSelectedProjectId(null); // Si no hay proyectos, deseleccionar
+    }
+  }, [projects]); // Dependencia: la lista de proyectos
+
+  const handleForceSync = async () => {
+    setIsBackendSyncing(true);
+    setError('');
+    try {
+      await forceSyncAll();
+    } catch (err) {
+      setError("Fallo al iniciar la sincronización o ya hay una en curso.");
+      setIsBackendSyncing(false);
+    }
+  };
+  
+  const handleSelectProject = (projectId) => {
+    if (selectedProjectId === projectId) {
+      setSelectedProjectId(null);
+    } else {
+      setSelectedProjectId(projectId);
+    }
   };
 
-  if (error && projects.length === 0) {
-    return <div className="container error-message">{error}</div>;
-  }
+  const filteredTasks = selectedProjectId
+    ? tasks.filter(task => task.project_id === selectedProjectId)
+    : []; // SSS: Si no hay proyecto seleccionado, no mostrar ninguna tarea inicialmente.
   
-  if (projects.length === 0 && !error) {
-      return (
-        <div className="container success-message">
-            <h1>🎉 ¡Excelente trabajo!</h1>
-            <p>No hay tareas en revisión en ningún proyecto monitoreado.</p>
-        </div>
-      );
+  const getCategoryName = () => {
+      return Object.keys(TABS).find(key => TABS[key] === activeTab) || 'Desconocida';
   }
 
-  return (
-    <div className="container">
-      <header>
-        <h1>📈 Dashboard de Tareas en Revisión</h1>
-      </header>
+  const getProjectName = () => {
+      // SSS: CORRECCIÓN - Mostrar "Seleccione un proyecto" si no hay ninguno seleccionado.
+      if (!selectedProjectId) return "Seleccione un proyecto";
+      return projects.find(p => p.id === selectedProjectId)?.name || "Proyecto Desconocido";
+  }
+
+  const renderContent = () => {
+    if (isLoading && !isBackendSyncing) {
+      return <div className="status-message">Cargando datos...</div>;
+    }
+    if (error) {
+      return <div className="status-message error">{error}</div>;
+    }
+    return (
       <main className="dashboard-layout">
         <aside className="left-panel">
           <ProjectList
             projects={projects}
-            selectedProjectId={selectedProject.id}
+            selectedProjectId={selectedProjectId}
             onSelectProject={handleSelectProject}
+            disabled={isBackendSyncing}
           />
         </aside>
         <section className="right-panel">
           <TaskDetails
-            tasks={tasks}
-            projectName={selectedProject.name}
-            isLoading={isLoadingTasks}
+            tasks={filteredTasks}
+            categoryName={`${getCategoryName()} en: ${getProjectName()}`}
+            isLoading={isLoading || isBackendSyncing}
           />
         </section>
       </main>
+    );
+  };
+
+  return (
+    <div className="container">
+      <header>
+        <h1>📈 Dashboard de Tareas GitLab</h1>
+        <div className="header-controls">
+          <div className="tabs-container">
+            {Object.entries(TABS).map(([displayName, canonicalName]) => (
+              <button
+                key={canonicalName}
+                className={`tab-button ${activeTab === canonicalName ? 'active' : ''}`}
+                onClick={() => setActiveTab(canonicalName)}
+                disabled={isBackendSyncing}
+              >
+                {displayName}
+              </button>
+            ))}
+          </div>
+          <div className="sync-container">
+            <button onClick={handleForceSync} disabled={isBackendSyncing} className="sync-button">
+              {isBackendSyncing ? 'Sincronizando...' : 'Sincronizar Ahora'}
+            </button>
+            {lastSyncTime && (
+              <span className="sync-time">
+                Última Sinc: {new Date(lastSyncTime).toLocaleString()}
+              </span>
+            )}
+          </div>
+        </div>
+      </header>
+      {renderContent()}
     </div>
   );
 }

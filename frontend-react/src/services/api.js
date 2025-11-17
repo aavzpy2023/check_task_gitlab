@@ -1,18 +1,21 @@
-// ./frontend-react/src/services/api.js
 import axios from 'axios';
 
-// SSS: Actualización del baseURL para que coincida con la nueva ruta de la API expuesta por Nginx.
 const apiClient = axios.create({
   baseURL: '/tareas/api',
 });
 
 /**
- * Obtiene la lista de proyectos que tienen tareas activas en revisión.
+ * Obtiene la lista de proyectos activos para una etiqueta de estado específica.
+ * @param {string} label El nombre canónico de la etiqueta de estado.
  * @returns {Promise<Array>} Una promesa que resuelve a un array de proyectos.
  */
-export const getActiveProjects = async () => {
+export const getActiveProjects = async (label) => {
+  if (!label) return [];
   try {
-    const response = await apiClient.get('/projects/active_from_db');
+    // SSS: CORRECCIÓN CRÍTICA Y FINAL
+    // La petición DEBE incluir el objeto de configuración { params: ... }
+    // para que axios construya la URL correctamente (ej. ...?label=En+Ejecucion)
+    const response = await apiClient.get('/projects/active_from_db', { params: { label } });
     return response.data;
   } catch (error) {
     console.error("Error fetching active projects:", error);
@@ -21,17 +24,64 @@ export const getActiveProjects = async () => {
 };
 
 /**
- * Obtiene las tareas para un ID de proyecto específico.
+ * Obtiene las tareas para un ID de proyecto y una etiqueta de estado específicos.
  * @param {number} projectId El ID del proyecto.
+ * @param {string} label El nombre canónico de la etiqueta de estado.
  * @returns {Promise<Array>} Una promesa que resuelve a un array de tareas.
  */
-export const getTasksForProject = async (projectId) => {
-  if (!projectId) return [];
+export const getTasksForProject = async (projectId, label) => {
+  if (!projectId || !label) return [];
   try {
-    const response = await apiClient.get(`/projects/${projectId}/tasks_from_db`);
+    const response = await apiClient.get(`/projects/${projectId}/tasks_from_db`, { params: { label } });
     return response.data;
   } catch (error) {
-    console.error(`Error fetching tasks for project ${projectId}:`, error);
+    console.error(`Error fetching tasks for project ${projectId} and label ${label}:`, error);
     throw error;
+  }
+};
+
+/**
+ * Obtiene TODAS las tareas para una etiqueta de estado específica, de todos los proyectos.
+ * @param {string} label El nombre canónico de la etiqueta de estado.
+ * @returns {Promise<Array>} Una promesa que resuelve a un array de tareas enriquecidas.
+ */
+export const getAllTasksByLabel = async (label) => {
+  if (!label) return [];
+  try {
+    const response = await apiClient.get('/tasks/all_by_label', { params: { label } });
+    return response.data;
+  } catch (error) {
+    console.error(`Error fetching all tasks for label ${label}:`, error);
+    throw error;
+  }
+};
+
+export const forceSyncAll = async () => {
+  try {
+    const response = await apiClient.post('/sync/all');
+    return response.data;
+  } catch (error) {
+    console.error("Error forcing sync:", error);
+    throw error;
+  }
+};
+
+export const getLastSyncTime = async () => {
+  try {
+    const response = await apiClient.get('/sync/last_time');
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching last sync time:", error);
+    throw error;
+  }
+};
+
+export const getSyncStatus = async () => {
+  try {
+    const response = await apiClient.get('/sync/status');
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching sync status:", error);
+    return { is_syncing: false };
   }
 };

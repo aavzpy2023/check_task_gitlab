@@ -22,7 +22,8 @@ const TaskItem = ({ task }) => {
           [LINK]
         </a>
         <h5 className="task-title" onClick={() => setIsExpanded(!isExpanded)}>
-          {task.title}
+          {/* SSS: Se añade el nombre del proyecto para el contexto */}
+          <strong>[{task.project_name}]</strong> {task.title}
         </h5>
       </div>
       {isExpanded && (

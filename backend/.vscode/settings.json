@@ -1,0 +1,26 @@
+{
+    "python.defaultInterpreterPath": "/usr/local/bin/python",
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.completeFunctionParens": true,
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.extraPaths": [
+        "./",
+        "./app"
+    ],
+    "python.languageServer": "Pylance",
+    
+    // 🔥 NUEVAS CONFIGURACIONES PARA FILTRAR SUGERENCIAS GENÉRICAS
+    "editor.suggest.showSnippets": false,
+    "editor.suggest.showWords": false,
+    "editor.wordBasedSuggestions": "off",
+    
+    "editor.quickSuggestions": {
+        "other": true,
+        "comments": false,
+        "strings": true
+    },
+    
+    // Opcional: Mejorar el ordenamiento
+    "editor.suggestSelection": "recentlyUsed",
+    "editor.suggest.snippetsPreventQuickSuggestions": false
+}

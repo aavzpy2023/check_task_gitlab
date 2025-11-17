@@ -100,3 +100,86 @@ header h1 {
   font-size: 0.9rem;
   color: #6c757d;
 }
+
+.tabs-container {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  border-bottom: none; /* Eliminamos el borde inferior */
+  padding-bottom: 0.5rem;
+}
+
+.tab-button {
+  width: auto;
+  padding: 0.75rem 1rem;
+  border: 1px solid #ced4da;
+  background-color: #fff;
+  border-radius: 0.25rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+  font-size: 1rem;
+}
+
+.tab-button:hover {
+  background-color: #e9ecef;
+}
+
+.tab-button.active {
+  background-color: #e9ecef; /* Color gris */
+  color: #212529;
+  border-color: #ced4da;
+  font-weight: bold;
+}
+
+.status-message {
+  padding: 2rem;
+  text-align: center;
+  font-size: 1.2rem;
+  color: #6c757d;
+}
+
+.status-message.error {
+  color: #dc3545;
+  font-weight: bold;
+}
+
+.header-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.sync-container {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.sync-button {
+  padding: 0.75rem 1rem;
+  border: 1px solid #28a745;
+  background-color: #28a745;
+  color: white;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  font-weight: bold;
+  transition: background-color 0.2s ease;
+}
+
+.sync-button:hover {
+  background-color: #218838;
+}
+
+.sync-button:disabled {
+  background-color: #6c757d;
+  border-color: #6c757d;
+  cursor: not-allowed;
+}
+
+.sync-time {
+  font-size: 0.9rem;
+  color: #6c757d;
+}

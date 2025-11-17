@@ -8,8 +8,10 @@ const ProjectList = ({ projects, selectedProjectId, onSelectProject }) => {
         {projects.map(project => (
           <button
             key={project.id}
+            // SSS: La clase 'selected' ahora se basa en la prop 'selectedProjectId'
             className={`project-button ${project.id === selectedProjectId ? 'selected' : ''}`}
-            onClick={() => onSelectProject(project.id, project.name)}
+            // SSS: El onClick ahora llama a la función pasada desde App.jsx
+            onClick={() => onSelectProject(project.id)}
           >
             {project.name} ({project.review_task_count})
           </button>

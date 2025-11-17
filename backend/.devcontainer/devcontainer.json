@@ -1,0 +1,37 @@
+{
+    "name": "App python",
+    "image": "python:3.11",  // o tu imagen personalizada
+    
+    // INSTALA HERRAMIENTAS ESENCIALES
+    "features": {
+        "ghcr.io/devcontainers/features/python:1": {
+            "version": "3.9"
+        }
+    },
+    
+    // CONFIGURACIONES DE VS CODE DENTRO DEL CONTENEDOR
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+//                "batisteo.vscode-django"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/bin/python",
+                "python.analysis.extraPaths": ["/workspace"],
+  //              "python.analysis.django": true
+            }
+        }
+    },
+    
+    // COMANDOS QUE SE EJECUTAN AL CREAR EL CONTENEDOR
+    // "postCreateCommand": "pip install -r requirements.txt && python manage.py migrate",
+    
+    // MONTA TU CÓDIGO
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/workspace,type=bind"
+    ],
+    
+    "workspaceFolder": "/workspace"
+}
