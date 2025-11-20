@@ -1,6 +1,7 @@
 Árbol de directorios para los archivos a exportar desde: .
 ├── .
 │   ├── .env
+│   ├── .prettierrc.json
 │   ├── README.md
 │   ├── docker-compose-gh.yml
 │   ├── docker-compose-prod.yml
@@ -14,8 +15,13 @@
 │   ├── backend/
 │   │   ├── .env
 │   │   ├── Dockerfile
+│   │   ├── label_discovery.py
 │   │   ├── main.py
 │   │   ├── requirements.txt
+│   │   ├── .vscode/
+│   │   │   ├── settings.json
+│   │   ├── .devcontainer/
+│   │   │   ├── devcontainer.json
 │   │   ├── __pycache__/
 │   ├── frontend/
 │   │   ├── Dockerfile
@@ -46,11 +52,14 @@
 │   │   │   │   ├── DocumentationPage.jsx
 │   │   │   │   ├── HomePage.jsx
 │   │   │   │   ├── ProjectsPage.jsx
+│   │   │   │   ├── TaskDashboardPage.jsx
 │   │   │   │   ├── TasksPage.jsx
 │   │   │   ├── services/
 │   │   │   │   ├── api.js
 │   │   │   ├── components/
+│   │   │   │   ├── Navbar.css
 │   │   │   │   ├── Navbar.jsx
+│   │   │   │   ├── PageTree.jsx
 │   │   │   │   ├── ProjectList.jsx
 │   │   │   │   ├── TaskDetails.jsx
 │   │   │   │   ├── TaskItem.css

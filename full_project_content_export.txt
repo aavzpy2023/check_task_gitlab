@@ -1,4 +1,4 @@
---- Contenido del Proyecto Exportado el 2025-11-13 11:09:54 ---
+--- Contenido del Proyecto Exportado el 2025-11-19 11:37:31 ---
 
 
 // --- ./.env ---
@@ -11,6 +11,17 @@ POSTGRES_PORT=5430
 POSTGRES_DB=chatbot
 POSTGRES_USER=admin
 POSTGRES_PASSWORD=postgres
+
+// --- ./.prettierrc.json ---
+
+{
+  "semi": true,
+  "trailingComma": "es5",
+  "singleQuote": true,
+  "printWidth": 80,
+  "tabWidth": 2,
+  "useTabs": false
+}
 
 // --- ./README.md ---
 
@@ -114,9 +125,78 @@ The dashboard is currently fully functional for its core purpose of monitoring a
 This project is licensed under the MIT License. See the `LICENSE` file for details.
 
 
+// --- ./backend/.devcontainer/devcontainer.json ---
+
+{
+    "name": "App python",
+    "image": "python:3.11",  // o tu imagen personalizada
+    
+    // INSTALA HERRAMIENTAS ESENCIALES
+    "features": {
+        "ghcr.io/devcontainers/features/python:1": {
+            "version": "3.9"
+        }
+    },
+    
+    // CONFIGURACIONES DE VS CODE DENTRO DEL CONTENEDOR
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+//                "batisteo.vscode-django"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/bin/python",
+                "python.analysis.extraPaths": ["/workspace"],
+  //              "python.analysis.django": true
+            }
+        }
+    },
+    
+    // COMANDOS QUE SE EJECUTAN AL CREAR EL CONTENEDOR
+    // "postCreateCommand": "pip install -r requirements.txt && python manage.py migrate",
+    
+    // MONTA TU CÓDIGO
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/workspace,type=bind"
+    ],
+    
+    "workspaceFolder": "/workspace"
+}
+
 // --- ./backend/.env ---
 
-SYNC_INTERVAL_SECONDS=600
+SYNC_INTERVAL_SECONDS=1800
+
+// --- ./backend/.vscode/settings.json ---
+
+{
+    "python.defaultInterpreterPath": "/usr/local/bin/python",
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.completeFunctionParens": true,
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.extraPaths": [
+        "./",
+        "./app"
+    ],
+    "python.languageServer": "Pylance",
+    
+    // 🔥 NUEVAS CONFIGURACIONES PARA FILTRAR SUGERENCIAS GENÉRICAS
+    "editor.suggest.showSnippets": false,
+    "editor.suggest.showWords": false,
+    "editor.wordBasedSuggestions": "off",
+    
+    "editor.quickSuggestions": {
+        "other": true,
+        "comments": false,
+        "strings": true
+    },
+    
+    // Opcional: Mejorar el ordenamiento
+    "editor.suggestSelection": "recentlyUsed",
+    "editor.suggest.snippetsPreventQuickSuggestions": false
+}
 
 // --- ./backend/Dockerfile ---
 
@@ -134,7 +214,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
-COPY . .
+COPY projects.csv .
 
 # Expose the port the application will run on
 EXPOSE 8001
@@ -142,8 +222,131 @@ EXPOSE 8001
 # The command to run the FastAPI application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
 
+// --- ./backend/label_discovery.py ---
+
+import os
+import sys
+from collections import defaultdict
+from pprint import pprint
+
+
+import pandas as pd
+import requests
+import urllib3
+
+# --- SSS: Copia de la infraestructura necesaria de main.py ---
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Cargar variables de entorno (asume que se ejecuta en el mismo entorno que la app)
+from dotenv import load_dotenv
+
+load_dotenv()
+
+GITLAB_URL = os.getenv("GITLAB_URL")
+PRIVATE_TOKEN = os.getenv("GITLAB_TOKEN")
+PROJECTS_CSV_PATH = "./projects.csv"
+
+
+def gitlab_api_request(method: str, endpoint: str, **kwargs) -> requests.Response:
+    if not PRIVATE_TOKEN:
+        raise ValueError("GitLab token no configurado.")
+    headers = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
+    api_url = f"{GITLAB_URL}/api/v4/{endpoint}"
+    try:
+        response = requests.request(
+            method, api_url, headers=headers, verify=False, timeout=15, **kwargs
+        )
+        response.raise_for_status()
+        return response
+    except requests.exceptions.RequestException as e:
+        print(
+            f"ERROR: Fallo en la petición a GitLab API ({api_url}): {e}",
+            file=sys.stderr,
+        )
+        return None
+
+def discover_labels():
+    """
+    Audita todos los proyectos monitoreados, descubre variaciones de etiquetas
+    y genera un diccionario de mapeo para la aplicación principal.
+    """
+    print("--- [AUDITORÍA DE ETIQUETAS] Iniciando escaneo... ---")
+
+    # Palabras clave para identificar cada categoría (en minúsculas)
+    KEYWORDS = {
+        "FUNCTIONAL_REVIEW": ["funcional"],
+        "QA_REVIEW": ["revisión", "revision"],
+        "IN_PROGRESS": ["ejecucion", "ejecución"],
+    }
+
+    if not os.path.exists(PROJECTS_CSV_PATH):
+        print(
+            f"FATAL: No se encontró el archivo '{PROJECTS_CSV_PATH}'.", file=sys.stderr
+        )
+        return
+
+    try:
+        projects_df = pd.read_csv(PROJECTS_CSV_PATH)
+        project_ids = projects_df["project_id"].tolist()
+    except Exception as e:
+        print(f"FATAL: Error al leer '{PROJECTS_CSV_PATH}': {e}", file=sys.stderr)
+        return
+
+    print(f"Se auditarán {len(project_ids)} proyectos.")
+
+    discovered_labels = defaultdict(set)
+
+    for project_id in project_ids:
+        print(f"  -> Escaneando Proyecto ID: {project_id}...")
+        response = gitlab_api_request(
+            "get", f"projects/{project_id}/labels?per_page=100"
+        )
+        if not response:
+            continue
+
+        project_labels = response.json()
+        for label in project_labels:
+            name_lower = label["name"].lower()
+
+            # La lógica debe ir de lo más específico a lo más general
+            if any(keyword in name_lower for keyword in KEYWORDS["FUNCTIONAL_REVIEW"]):
+                discovered_labels["FUNCTIONAL_REVIEW"].add(label["name"])
+            elif any(keyword in name_lower for keyword in KEYWORDS["QA_REVIEW"]):
+                discovered_labels["QA_REVIEW"].add(label["name"])
+            elif any(keyword in name_lower for keyword in KEYWORDS["IN_PROGRESS"]):
+                discovered_labels["IN_PROGRESS"].add(label["name"])
+
+    print("\n--- [AUDITORÍA COMPLETA] Descubrimiento finalizado. ---")
+    if not discovered_labels:
+        print("No se encontraron etiquetas que coincidan con las palabras clave.")
+        return
+
+    # Generar el diccionario de Python final
+    final_mapping = {
+        "TaskStatus.IN_PROGRESS": sorted(list(discovered_labels["IN_PROGRESS"])),
+        "TaskStatus.QA_REVIEW": sorted(list(discovered_labels["QA_REVIEW"])),
+        "TaskStatus.FUNCTIONAL_REVIEW": sorted(
+            list(discovered_labels["FUNCTIONAL_REVIEW"])
+        ),
+    }
+
+    print(
+        "\nCOPIE Y PEGUE EL SIGUIENTE BLOQUE EN 'backend/main.py' REEMPLAZANDO 'LABEL_MAPPING':\n"
+    )
+    print("LABEL_MAPPING = {")
+    for key, labels in final_mapping.items():
+        print(f"    {key}: {labels},")
+    print("}")
+    print("\n--- [FIN DEL SCRIPT] ---")
+
+
+if __name__ == "__main__":
+    discover_labels()
+
+
 // --- ./backend/main.py ---
 
+import enum
 import os
 import sys
 import tempfile
@@ -151,12 +354,13 @@ import time
 from contextlib import asynccontextmanager
 from threading import Thread
 from typing import Any, Dict, List, Optional
+from collections import defaultdict
 
 import pandas as pd
 import pypandoc
 import requests
 import urllib3
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
@@ -177,157 +381,152 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # --- Configuración ---
 GITLAB_URL = os.getenv("GITLAB_URL")
 PRIVATE_TOKEN = os.getenv("GITLAB_TOKEN")
-LABEL_TO_TRACK = "PARA REVISIÓN"
 DATABASE_URL = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@postgres_chatbot:5432/{os.getenv('POSTGRES_DB')}"
 SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", 600))
 PROJECTS_CSV_PATH = "./projects.csv"
+SYNC_IN_PROGRESS = False
 
 # --- SQLAlchemy Setup ---
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+# --- Modelos ---
+class TaskStatus(str, enum.Enum):
+    IN_PROGRESS = "En Ejecucion"
+    QA_REVIEW = "PARA REVISIÓN"
+    FUNCTIONAL_REVIEW = "Revision Funcional"
 
-# --- Modelos SQLAlchemy (sin cambios) ---
+LABEL_MAPPING = {
+    TaskStatus.IN_PROGRESS: ['A EJECUCIÓN', 'A ejecución', 'EN EJECUCIÓN', 'Ejecución', 'En Ejecución'],
+    TaskStatus.QA_REVIEW: ['PARA REVISION', 'PARA REVISIÓN', 'Para Revisión'],
+    TaskStatus.FUNCTIONAL_REVIEW: ['REVISION FUNCIONAL', 'REVISIÓN FUNCIONAL', 'Revisión Funcional'],
+}
+
+class SystemMetadata(Base):
+    __tablename__ = "system_metadata"
+    key = Column(String(50), primary_key=True, default="singleton")
+    last_sync_time = Column(DateTime(timezone=True), server_default=func.now())
+
 class MonitoredProject(Base):
     __tablename__ = "monitored_projects"
     project_id = Column(BigInteger, primary_key=True, index=True)
     project_name = Column(String(255), nullable=False)
 
-
 class GitLabTaskDB(Base):
     __tablename__ = "gitlab_tasks"
     task_id = Column(BigInteger, primary_key=True)
-    project_id = Column(
-        BigInteger,
-        ForeignKey("monitored_projects.project_id"),
-        nullable=False,
-        index=True,
-    )
+    project_id = Column(BigInteger, ForeignKey("monitored_projects.project_id"), nullable=False, index=True)
+    task_status_label = Column(String(50), nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True))
     raw_data = Column(JSONB)
-
-
-# --- Modelos Pydantic (sin cambios) ---
-
 
 class TimeStats(BaseModel):
     human_time_estimate: Optional[str] = None
     human_total_time_spent: Optional[str] = None
 
-
 class Task(BaseModel):
+    project_id: int
     title: str
-    description: Optional[str]
+    description: Optional[str] = None
     author: str
     url: str
-    assignee: Optional[str]
-    milestone: Optional[str]
+    assignee: Optional[str] = None
+    milestone: Optional[str] = None
     created_at: Optional[str] = None
     labels: List[str] = []
     time_stats: TimeStats = Field(default_factory=TimeStats)
 
+class TaskWithProject(Task):
+    project_name: str
 
 class ProjectSummary(BaseModel):
     id: int
     name: str
     review_task_count: int
 
-
-# --- SSS: LÓGICA DE SINCRONIZACIÓN AUTOMÁTICA ---
-def sync_all_projects_periodically(interval_seconds: int):
-    """Esta función se ejecuta en un hilo de fondo de forma continua."""
-    while True:
-        print(
-            f"--- [SYNC THREAD] Iniciando ciclo de sincronización a las {time.ctime()} ---"
-        )
-        db = SessionLocal()
-        try:
-            projects = db.query(MonitoredProject).all()
-            if not projects:
-                print(
-                    "--- [SYNC THREAD] No hay proyectos monitoreados para sincronizar."
-                )
-            else:
-                print(f"--- [SYNC THREAD] Se sincronizarán {len(projects)} proyectos.")
-                for project in projects:
-                    sync_single_project(project.project_id, db)
-        except Exception as e:
-            print(
-                f"--- [SYNC THREAD] 🚨 ERROR CRÍTICO durante el ciclo de sincronización: {e}"
-            )
-        finally:
-            db.close()
-        print(
-            f"--- [SYNC THREAD] Ciclo completado. Esperando {interval_seconds} segundos. ---"
-        )
-        time.sleep(interval_seconds)
-
-
+# --- Lógica de Sincronización ---
 def sync_single_project(project_id: int, db: Session):
     try:
-        tasks_json = gitlab_api_request(
-            "get",
-            f"projects/{project_id}/issues?labels={LABEL_TO_TRACK}&state=opened&per_page=100",
-        ).json()
-        db.query(GitLabTaskDB).filter(GitLabTaskDB.project_id == project_id).delete(
-            synchronize_session=False
-        )
-        if not tasks_json:
-            db.commit()
-            print(
-                f"--- [SYNC] ✅ Proyecto {project_id}: No se encontraron tareas. BD actualizada."
-            )
-            return {
-                "message": "No se encontraron tareas en revisión. La base de datos ha sido actualizada."
-            }
-        tasks_to_insert = [
-            {
-                "task_id": t["id"],
-                "project_id": t["project_id"],
-                "updated_at": t["updated_at"],
-                "raw_data": t,
-            }
-            for t in tasks_json
-        ]
+        db.query(GitLabTaskDB).filter(GitLabTaskDB.project_id == project_id).delete(synchronize_session=False)
+        tasks_found = defaultdict(list)
+        for status_enum, label_variations in LABEL_MAPPING.items():
+            for label in label_variations:
+                print(f"--- [SYNC] Proyecto {project_id}: Consultando etiqueta '{label}'...")
+                try:
+                    tasks_json = gitlab_api_request("get", f"projects/{project_id}/issues?labels={label}&state=opened&per_page=100").json()
+                    if tasks_json:
+                        for task in tasks_json:
+                            tasks_found[task['id']].append({"status": status_enum, "data": task})
+                except Exception: continue
+        tasks_to_insert = []
+        for task_id, found_states in tasks_found.items():
+            chosen_state = None
+            if any(s['status'] == TaskStatus.FUNCTIONAL_REVIEW for s in found_states): chosen_state = TaskStatus.FUNCTIONAL_REVIEW
+            elif any(s['status'] == TaskStatus.QA_REVIEW for s in found_states): chosen_state = TaskStatus.QA_REVIEW
+            elif any(s['status'] == TaskStatus.IN_PROGRESS for s in found_states): chosen_state = TaskStatus.IN_PROGRESS
+            if chosen_state:
+                final_task_data = next(s['data'] for s in found_states if s['status'] == chosen_state)
+                tasks_to_insert.append({"task_id": task_id, "project_id": final_task_data["project_id"], "task_status_label": chosen_state.value, "updated_at": final_task_data["updated_at"], "raw_data": final_task_data})
         if tasks_to_insert:
             db.execute(pg_insert(GitLabTaskDB).values(tasks_to_insert))
         db.commit()
-        print(
-            f"--- [SYNC] ✅ Proyecto {project_id}: Sincronización exitosa. {len(tasks_to_insert)} tareas procesadas."
-        )
-        return {
-            "message": f"Sincronización exitosa. {len(tasks_to_insert)} tareas procesadas."
-        }
+        print(f"--- [SYNC] ✅ Proyecto {project_id}: Sincronización exitosa. {len(tasks_to_insert)} tareas únicas procesadas.")
     except Exception as e:
         print(f"--- [SYNC] 🚨 FALLO para proyecto {project_id}: {e}")
         db.rollback()
-        return {"message": f"Fallo al sincronizar proyecto {project_id}."}
 
+def run_full_sync(db: Session):
+    global SYNC_IN_PROGRESS
+    if SYNC_IN_PROGRESS:
+        print("--- [SYNC] Advertencia: Se intentó iniciar una sincronización mientras otra ya estaba en curso.")
+        return
+    
+    try:
+        SYNC_IN_PROGRESS = True
+        print(f"--- [SYNC] Iniciando ciclo... ---")
+        projects = db.query(MonitoredProject).all()
+        if not projects:
+            print("--- [SYNC] No hay proyectos para sincronizar.")
+            return
+        
+        for project in projects:
+            sync_single_project(project.project_id, db)
+        
+        stmt = pg_insert(SystemMetadata).values(key="singleton", last_sync_time=func.now()).on_conflict_do_update(index_elements=['key'], set_={'last_sync_time': func.now()})
+        db.execute(stmt)
+        db.commit()
+        print(f"--- [SYNC] ✅ Ciclo completado. Hora actualizada. ---")
+    finally:
+        SYNC_IN_PROGRESS = False
+        print(f"--- [SYNC] Finalizando ciclo. Lock liberado. ---")
 
-# --- Lógica API GitLab & Dependencias (sin cambios) ---
-def gitlab_api_request(
-    method: str, endpoint: str, raise_for_status: bool = True, **kwargs
-) -> requests.Response:
+def sync_all_projects_periodically(interval_seconds: int):
+    while True:
+        db = SessionLocal()
+        try:
+            run_full_sync(db)
+        except Exception as e:
+            print(f"--- [SYNC THREAD] 🚨 ERROR CRÍTICO durante el ciclo: {e}")
+        finally:
+            db.close()
+        print(f"--- [SYNC THREAD] Esperando {interval_seconds} segundos. ---")
+        time.sleep(interval_seconds)
+
+def gitlab_api_request(method: str, endpoint: str, raise_for_status: bool = True, **kwargs) -> requests.Response:
     if not PRIVATE_TOKEN:
         raise HTTPException(status_code=500, detail="GitLab token no configurado.")
     headers = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
     api_url = f"{GITLAB_URL}/api/v4/{endpoint}"
     try:
-        response = requests.request(
-            method, api_url, headers=headers, verify=False, timeout=10, **kwargs
-        )
+        response = requests.request(method, api_url, headers=headers, verify=False, timeout=10, **kwargs)
         if raise_for_status:
             response.raise_for_status()
         return response
     except requests.exceptions.HTTPError as e:
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"Error de GitLab API: {e.response.text}",
-        )
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error de GitLab API: {e.response.text}")
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=502, detail=f"Error de red: {e}")
-
 
 def get_db():
     db = SessionLocal()
@@ -335,7 +534,6 @@ def get_db():
         yield db
     finally:
         db.close()
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -345,47 +543,23 @@ async def lifespan(app: FastAPI):
         print("--- [STARTUP] Verificando y creando esquema de base de datos...")
         Base.metadata.create_all(bind=engine)
         print("--- [STARTUP] ✅ Esquema de BD verificado.")
-
-        # SSS: LÓGICA DE AUTO-POBLACIÓN IDEMPOTENTE (AHORA CON PANDAS)
         if db.query(MonitoredProject).count() == 0:
-            print(
-                "--- [STARTUP] ℹ️ La tabla de proyectos está vacía. Intentando auto-poblar desde 'projects.csv'..."
-            )
+            print("--- [STARTUP] ℹ️ La tabla de proyectos está vacía. Intentando auto-poblar desde 'projects.csv'...")
             if not os.path.exists(PROJECTS_CSV_PATH):
-                print(
-                    f"--- [STARTUP] ⚠️ ADVERTENCIA: No se encontró '{PROJECTS_CSV_PATH}'."
-                )
+                print(f"--- [STARTUP] ⚠️ ADVERTENCIA: No se encontró '{PROJECTS_CSV_PATH}'.")
             else:
                 try:
                     df = pd.read_csv(PROJECTS_CSV_PATH)
-                    projects_to_add = [
-                        MonitoredProject(
-                            project_id=int(row.project_id),
-                            project_name=str(row.project_name).strip(),
-                        )
-                        for row in df.itertuples(index=False)
-                    ]
+                    projects_to_add = [MonitoredProject(project_id=int(row.project_id), project_name=str(row.project_name).strip()) for row in df.itertuples(index=False)]
                     db.add_all(projects_to_add)
                     db.commit()
-                    print(
-                        f"--- [STARTUP] ✅ Se poblaron {len(projects_to_add)} proyectos desde el CSV usando Pandas."
-                    )
+                    print(f"--- [STARTUP] ✅ Se poblaron {len(projects_to_add)} proyectos desde el CSV usando Pandas.")
                 except Exception as e:
-                    print(
-                        f"--- [STARTUP] 🚨 ERROR al leer o procesar CSV con Pandas: {e}"
-                    )
+                    print(f"--- [STARTUP] 🚨 ERROR al leer o procesar CSV con Pandas: {e}")
                     db.rollback()
         else:
-            print(
-                "--- [STARTUP] ℹ️ La base de datos ya contiene proyectos. Saltando la fase de población."
-            )
-
-        print("--- [STARTUP] Iniciando hilo de sincronización en segundo plano...")
-        sync_thread = Thread(
-            target=sync_all_projects_periodically,
-            args=(SYNC_INTERVAL_SECONDS,),
-            daemon=True,
-        )
+            print("--- [STARTUP] ℹ️ La base de datos ya contiene proyectos. Saltando la fase de población.")
+        sync_thread = Thread(target=sync_all_projects_periodically, args=(SYNC_INTERVAL_SECONDS,), daemon=True)
         sync_thread.start()
         print("--- [STARTUP] ✅ Hilo de sincronización iniciado.")
     except Exception as e:
@@ -393,70 +567,58 @@ async def lifespan(app: FastAPI):
         db.rollback()
     finally:
         db.close()
-
     yield
     print("--- [SHUTDOWN] La aplicación se está apagando. ---")
 
+app = FastAPI(title="Portal API v6.2", version="6.2.0", lifespan=lifespan, root_path="/api")
 
-# SSS: root_path gestiona el prefijo /api. Los decoradores NO deben incluirlo.
-app = FastAPI(
-    title="Portal API v5.3", version="5.3.0", lifespan=lifespan, root_path="/api"
-)
+@app.post("/sync/all", status_code=202, tags=["Database Sync"])
+def force_full_sync(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    background_tasks.add_task(run_full_sync, db)
+    return {"message": "La sincronización completa ha sido iniciada en segundo plano."}
 
-# === NUEVOS Endpoints del Dashboard (desde BD) ===
+@app.get("/sync/last_time", response_model=Dict[str, Optional[str]], tags=["Database Sync"])
+def get_last_sync_time(db: Session = Depends(get_db)):
+    metadata = db.query(SystemMetadata).filter(SystemMetadata.key == "singleton").first()
+    if metadata and metadata.last_sync_time:
+        return {"last_sync_time": metadata.last_sync_time.isoformat()}
+    return {"last_sync_time": None}
+
+@app.get("/projects/active_from_db", response_model=List[ProjectSummary], tags=["Task Dashboard (DB)"])
+def get_active_projects_from_db(label: TaskStatus = Query(...), db: Session = Depends(get_db)):
+    label_value = label.value
+    results = (db.query(MonitoredProject.project_id, MonitoredProject.project_name, func.count(GitLabTaskDB.task_id).label("task_count")).join(GitLabTaskDB, MonitoredProject.project_id == GitLabTaskDB.project_id).filter(GitLabTaskDB.task_status_label == label_value).group_by(MonitoredProject.project_id, MonitoredProject.project_name).order_by(func.count(GitLabTaskDB.task_id).desc()).all())
+    return [ProjectSummary(id=pid, name=pname, review_task_count=count) for pid, pname, count in results]
+
+@app.get("/tasks/all_by_label", response_model=List[TaskWithProject], tags=["Task Dashboard (DB)"])
+def get_all_tasks_by_label(label: TaskStatus = Query(...), db: Session = Depends(get_db)):
+    label_value = label.value
+    db_tasks = (db.query(GitLabTaskDB, MonitoredProject.project_name).join(MonitoredProject, GitLabTaskDB.project_id == MonitoredProject.project_id).filter(GitLabTaskDB.task_status_label == label_value).order_by(MonitoredProject.project_name, GitLabTaskDB.updated_at.desc()).all())
+    if not db_tasks: return []
+    task_list = []
+    for db_task, project_name in db_tasks:
+        issue = db_task.raw_data
+        assignee = issue.get("assignees", [{}])[0].get("name") if issue.get("assignees") else None
+        milestone = issue.get("milestone", {}).get("title") if issue.get("milestone") else None
+        raw_time_stats = issue.get("time_stats", {}) or {}
+        time_stats_obj = TimeStats(human_time_estimate=raw_time_stats.get("human_time_estimate"), human_total_time_spent=raw_time_stats.get("human_total_time_spent"))
+        task_list.append(TaskWithProject(project_id=issue.get("project_id"), title=issue.get("title", "N/A"), description=issue.get("description"), author=issue.get("author", {}).get("name", "N/A"), url=issue.get("web_url", "#"), assignee=assignee, milestone=milestone, project_name=project_name, created_at=issue.get("created_at"), labels=issue.get("labels", []), time_stats=time_stats_obj))
+    return task_list
 
 
-@app.get(
-    "/projects/active_from_db",
-    response_model=List[ProjectSummary],
-    tags=["Task Dashboard (DB)"],
-)
-def get_active_projects_from_db(db: Session = Depends(get_db)):
-    results = (
-        db.query(
-            MonitoredProject.project_id,
-            MonitoredProject.project_name,
-            func.count(GitLabTaskDB.task_id).label("task_count"),
-        )
-        .join(GitLabTaskDB, MonitoredProject.project_id == GitLabTaskDB.project_id)
-        .group_by(MonitoredProject.project_id, MonitoredProject.project_name)
-        .having(func.count(GitLabTaskDB.task_id) > 0)
-        .order_by(func.count(GitLabTaskDB.task_id).desc())
-        .all()
-    )
-    return [
-        ProjectSummary(id=pid, name=pname, review_task_count=count)
-        for pid, pname, count in results
-    ]
-
-
-@app.get(
-    "/projects/{project_id}/tasks_from_db",
-    response_model=List[Task],
-    tags=["Task Dashboard (DB)"],
-)
-def get_project_tasks_from_db(project_id: int, db: Session = Depends(get_db)):
-    db_tasks = (
-        db.query(GitLabTaskDB).filter(GitLabTaskDB.project_id == project_id).all()
-    )
-    if not db_tasks:
-        return []
+@app.get("/projects/{project_id}/tasks_from_db", response_model=List[Task], tags=["Task Dashboard (DB)"])
+def get_project_tasks_from_db(project_id: int, label: TaskStatus = Query(...), db: Session = Depends(get_db)):
+    label_value = label.value
+    db_tasks = db.query(GitLabTaskDB).filter(GitLabTaskDB.project_id == project_id, GitLabTaskDB.task_status_label == label_value).all()
+    if not db_tasks: return []
     task_list = []
     for db_task in db_tasks:
         issue = db_task.raw_data
         assignee = issue["assignees"][0].get("name") if issue.get("assignees") else None
         milestone = issue["milestone"].get("title") if issue.get("milestone") else None
-        task_list.append(
-            Task(
-                title=issue.get("title", "N/A"),
-                description=issue.get("description"),
-                author=issue.get("author", {}).get("name", "N/A"),
-                url=issue.get("web_url", "#"),
-                assignee=assignee,
-                milestone=milestone,
-            )
-        )
+        task_list.append(Task(title=issue.get("title", "N/A"), description=issue.get("description"), author=issue.get("author", {}).get("name", "N/A"), url=issue.get("web_url", "#"), assignee=assignee, milestone=milestone))
     return task_list
+
 
 
 # === Endpoints de Sincronización y Gestión ===
@@ -511,9 +673,7 @@ def get_monitored_projects(db: Session = Depends(get_db)):
 
 
 @app.post("/monitored_projects", status_code=201, tags=["Project Management"])
-def add_monitored_project(
-    project_id: int, project_name: str, db: Session = Depends(get_db)
-):
+def add_monitored_project(project_id: int, project_name: str, db: Session = Depends(get_db)):
     existing_project = (
         db.query(MonitoredProject)
         .filter(MonitoredProject.project_id == project_id)
@@ -529,6 +689,21 @@ def add_monitored_project(
     db.refresh(new_project)
     return new_project
 
+
+# === Endpoints de Sincronización con Gestión de Estado ===
+@app.get("/sync/status", response_model=Dict[str, bool], tags=["Database Sync"])
+def get_sync_status():
+    """Consulta si un proceso de sincronización está actualmente en curso."""
+    return {"is_syncing": SYNC_IN_PROGRESS}
+
+@app.post("/sync/all", status_code=202, tags=["Database Sync"])
+def force_full_sync(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Inicia una sincronización completa si no hay otra en curso."""
+    if SYNC_IN_PROGRESS:
+        raise HTTPException(status_code=409, detail="Una sincronización ya está en progreso.")
+    
+    background_tasks.add_task(run_full_sync, db)
+    return {"message": "La sincronización completa ha sido iniciada en segundo plano."}
 
 // --- ./backend/requirements.txt ---
 
@@ -669,8 +844,9 @@ volumes:
 
 services:
   nginx:
-    build:
-      context: ./nginx
+    # build:
+    #   context: ./nginx
+    image: nginx:latest
     container_name: main_proxy
     ports:
       - "8503:80"
@@ -680,6 +856,8 @@ services:
       - backend
       - frontend-react
     restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
 
   backend:
     build:
@@ -697,8 +875,9 @@ services:
     restart: unless-stopped
 
   frontend-react:
-    build:
-      context: ./frontend-react
+    # build:
+    #   context: ./frontend-react
+    image: gitlab-dashboard-frontend:victory-final
     container_name: gitlab_dashboard_frontend_react
     volumes:
       - ./frontend-react:/app
@@ -720,7 +899,7 @@ services:
       - app-network
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      # - ./postgres/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -948,99 +1127,299 @@ header h1 {
   color: #6c757d;
 }
 
+.tabs-container {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  border-bottom: none; /* Eliminamos el borde inferior */
+  padding-bottom: 0.5rem;
+}
+
+.tab-button {
+  width: auto;
+  padding: 0.75rem 1rem;
+  border: 1px solid #ced4da;
+  background-color: #fff;
+  border-radius: 0.25rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+  font-size: 1rem;
+}
+
+.tab-button:hover {
+  background-color: #e9ecef;
+}
+
+.tab-button.active {
+  background-color: #e9ecef; /* Color gris */
+  color: #212529;
+  border-color: #ced4da;
+  font-weight: bold;
+}
+
+.status-message {
+  padding: 2rem;
+  text-align: center;
+  font-size: 1.2rem;
+  color: #6c757d;
+}
+
+.status-message.error {
+  color: #dc3545;
+  font-weight: bold;
+}
+
+.header-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.sync-container {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.sync-button {
+  padding: 0.75rem 1rem;
+  border: 1px solid #28a745;
+  background-color: #28a745;
+  color: white;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  font-weight: bold;
+  transition: background-color 0.2s ease;
+}
+
+.sync-button:hover {
+  background-color: #218838;
+}
+
+.sync-button:disabled {
+  background-color: #6c757d;
+  border-color: #6c757d;
+  cursor: not-allowed;
+}
+
+.sync-time {
+  font-size: 0.9rem;
+  color: #6c757d;
+}
+
 // --- ./frontend-react/src/App.jsx ---
 
+// ./frontend-react/src/App.jsx
 import React, { useState, useEffect } from 'react';
-import { getActiveProjects, getTasksForProject } from './services/api';
+import { getActiveProjects, getAllTasksByLabel, forceSyncAll, getLastSyncTime, getSyncStatus } from './services/api';
 import ProjectList from './components/ProjectList';
 import TaskDetails from './components/TaskDetails';
-import './App.css'; // Archivo principal de estilos
+import './App.css';
+
+const TABS = {
+  'Ejecución': 'En Ejecucion',
+  'Revisión': 'PARA REVISIÓN',
+  'Rev. Funcional': 'Revision Funcional',
+};
 
 function App() {
   const [projects, setProjects] = useState([]);
-  const [selectedProject, setSelectedProject] = useState({ id: null, name: '' });
   const [tasks, setTasks] = useState([]);
-  const [isLoadingTasks, setIsLoadingTasks] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
+  const [activeTab, setActiveTab] = useState(TABS['Revisión']);
+  const [selectedProjectId, setSelectedProjectId] = useState(null);
+  const [lastSyncTime, setLastSyncTime] = useState(null);
+  const [isBackendSyncing, setIsBackendSyncing] = useState(false);
 
-  // Efecto para cargar la lista de proyectos al montar el componente
+  const fetchData = async () => {
+    setIsLoading(true);
+    setError('');
+    try {
+      const [projectsData, tasksData, syncTimeData] = await Promise.all([
+        getActiveProjects(activeTab),
+        getAllTasksByLabel(activeTab),
+        getLastSyncTime()
+      ]);
+      
+      setProjects(projectsData);
+      setTasks(tasksData);
+      setLastSyncTime(syncTimeData.last_sync_time);
+      
+    } catch (err) {
+      console.error("Error en fetchData:", err);
+      setError(`Fallo al cargar los datos. Verifique la conexión con la API.`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  // Hook para polling de estado
   useEffect(() => {
-    const fetchProjects = async () => {
+    const pollSyncStatus = async () => {
       try {
-        const activeProjects = await getActiveProjects();
-        setProjects(activeProjects);
-        // Si hay proyectos, selecciona el primero por defecto
-        if (activeProjects && activeProjects.length > 0) {
-          setSelectedProject({ id: activeProjects[0].id, name: activeProjects[0].name });
+        const status = await getSyncStatus();
+        const isCurrentlySyncing = status.is_syncing;
+        if (isBackendSyncing && !isCurrentlySyncing) {
+          fetchData();
         }
-      } catch (err) {
-        setError('No se pudo cargar la lista de proyectos.');
+        setIsBackendSyncing(isCurrentlySyncing);
+      } catch (pollError) {
+        console.error("Error en el polling de estado de sincronización:", pollError);
+        setIsBackendSyncing(false);
       }
     };
-    fetchProjects();
-  }, []); // El array vacío asegura que se ejecute solo una vez
+    pollSyncStatus();
+    const intervalId = setInterval(pollSyncStatus, 3000);
+    return () => clearInterval(intervalId);
+  }, [isBackendSyncing]);
 
-  // Efecto para cargar las tareas cuando cambia el proyecto seleccionado
+  // Hook para cargar datos cuando cambia la pestaña
   useEffect(() => {
-    const fetchTasks = async () => {
-      if (!selectedProject.id) return;
-      setIsLoadingTasks(true);
-      setError('');
-      try {
-        const projectTasks = await getTasksForProject(selectedProject.id);
-        setTasks(projectTasks);
-      } catch (err) {
-        setError(`No se pudieron cargar las tareas para ${selectedProject.name}.`);
-      } finally {
-        setIsLoadingTasks(false);
-      }
-    };
-    fetchTasks();
-  }, [selectedProject.id]); // Se ejecuta cada vez que selectedProject.id cambia
+    fetchData();
+  }, [activeTab]);
 
-  const handleSelectProject = (projectId, projectName) => {
-    setSelectedProject({ id: projectId, name: projectName });
+  // SSS: CORRECCIÓN DE UX FINAL
+  // Este nuevo hook se ejecuta DESPUÉS de que los proyectos han sido actualizados
+  useEffect(() => {
+    if (projects && projects.length > 0) {
+      setSelectedProjectId(projects[0].id); // Seleccionar siempre el primer proyecto
+    } else {
+      setSelectedProjectId(null); // Si no hay proyectos, deseleccionar
+    }
+  }, [projects]); // Dependencia: la lista de proyectos
+
+  const handleForceSync = async () => {
+    setIsBackendSyncing(true);
+    setError('');
+    try {
+      await forceSyncAll();
+    } catch (err) {
+      setError("Fallo al iniciar la sincronización o ya hay una en curso.");
+      setIsBackendSyncing(false);
+    }
+  };
+  
+  const handleSelectProject = (projectId) => {
+    if (selectedProjectId === projectId) {
+      setSelectedProjectId(null);
+    } else {
+      setSelectedProjectId(projectId);
+    }
   };
 
-  if (error && projects.length === 0) {
-    return <div className="container error-message">{error}</div>;
-  }
+  const filteredTasks = selectedProjectId
+    ? tasks.filter(task => task.project_id === selectedProjectId)
+    : []; // SSS: Si no hay proyecto seleccionado, no mostrar ninguna tarea inicialmente.
   
-  if (projects.length === 0 && !error) {
-      return (
-        <div className="container success-message">
-            <h1>🎉 ¡Excelente trabajo!</h1>
-            <p>No hay tareas en revisión en ningún proyecto monitoreado.</p>
-        </div>
-      );
+  const getCategoryName = () => {
+      return Object.keys(TABS).find(key => TABS[key] === activeTab) || 'Desconocida';
   }
 
-  return (
-    <div className="container">
-      <header>
-        <h1>📈 Dashboard de Tareas en Revisión</h1>
-      </header>
+  const getProjectName = () => {
+      // SSS: CORRECCIÓN - Mostrar "Seleccione un proyecto" si no hay ninguno seleccionado.
+      if (!selectedProjectId) return "Seleccione un proyecto";
+      return projects.find(p => p.id === selectedProjectId)?.name || "Proyecto Desconocido";
+  }
+
+  const renderContent = () => {
+    if (isLoading && !isBackendSyncing) {
+      return <div className="status-message">Cargando datos...</div>;
+    }
+    if (error) {
+      return <div className="status-message error">{error}</div>;
+    }
+    return (
       <main className="dashboard-layout">
         <aside className="left-panel">
           <ProjectList
             projects={projects}
-            selectedProjectId={selectedProject.id}
+            selectedProjectId={selectedProjectId}
             onSelectProject={handleSelectProject}
+            disabled={isBackendSyncing}
           />
         </aside>
         <section className="right-panel">
           <TaskDetails
-            tasks={tasks}
-            projectName={selectedProject.name}
-            isLoading={isLoadingTasks}
+            tasks={filteredTasks}
+            categoryName={`${getCategoryName()} en: ${getProjectName()}`}
+            isLoading={isLoading || isBackendSyncing}
           />
         </section>
       </main>
+    );
+  };
+
+  return (
+    <div className="container">
+      <header>
+        <h1>📈 Dashboard de Tareas GitLab</h1>
+        <div className="header-controls">
+          <div className="tabs-container">
+            {Object.entries(TABS).map(([displayName, canonicalName]) => (
+              <button
+                key={canonicalName}
+                className={`tab-button ${activeTab === canonicalName ? 'active' : ''}`}
+                onClick={() => setActiveTab(canonicalName)}
+                disabled={isBackendSyncing}
+              >
+                {displayName}
+              </button>
+            ))}
+          </div>
+          <div className="sync-container">
+            <button onClick={handleForceSync} disabled={isBackendSyncing} className="sync-button">
+              {isBackendSyncing ? 'Sincronizando...' : 'Sincronizar Ahora'}
+            </button>
+            {lastSyncTime && (
+              <span className="sync-time">
+                Última Sinc: {new Date(lastSyncTime).toLocaleString()}
+              </span>
+            )}
+          </div>
+        </div>
+      </header>
+      {renderContent()}
     </div>
   );
 }
 
 export default App;
+
+// --- ./frontend-react/src/components/Navbar.css ---
+
+.navbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 2rem;
+  background-color: #fff;
+  border-bottom: 1px solid #dee2e6;
+}
+.navbar-brand {
+  font-weight: bold;
+  font-size: 1.25rem;
+  text-decoration: none;
+  color: #212529;
+}
+.navbar-links {
+  display: flex;
+  gap: 1.5rem;
+}
+.nav-link {
+  text-decoration: none;
+  color: #495057;
+  font-size: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 3px solid transparent;
+}
+.nav-link.active {
+  color: #007bff;
+  border-bottom-color: #007bff;
+}
 
 // --- ./frontend-react/src/components/Navbar.jsx ---
 
@@ -1063,6 +1442,50 @@ const Navbar = () => (
 
 export default Navbar;
 
+// --- ./frontend-react/src/components/PageTree.jsx ---
+
+import React, { useState } from 'react';
+import './PageTree.css';
+
+const PageTreeNode = ({ node, onSelectPage }) => {
+  const [isOpen, setIsOpen] = useState(true);
+  const isFolder = node.type === 'folder';
+
+  const handleToggle = () => {
+    setIsOpen(!isOpen);
+  };
+
+  const handleSelect = () => {
+    if (!isFolder) {
+      onSelectPage({ slug: node.slug, title: node.title });
+    }
+  };
+
+  return (
+    <div className="tree-node">
+      <div className={`node-label ${isFolder ? 'folder' : 'file'}`} onClick={isFolder ? handleToggle : handleSelect}>
+        {isFolder && <span>{isOpen ? '▼' : '►'} </span>}
+        {node.title}
+      </div>
+      {isFolder && isOpen && (
+        <div className="node-children">
+          <PageTree nodes={node.children} onSelectPage={onSelectPage} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+const PageTree = ({ nodes, onSelectPage }) => (
+  <div>
+    {nodes.map(node => (
+      <PageTreeNode key={node.id} node={node} onSelectPage={onSelectPage} />
+    ))}
+  </div>
+);
+
+export default PageTree;
+
 // --- ./frontend-react/src/components/ProjectList.jsx ---
 
 import React from 'react';
@@ -1075,8 +1498,10 @@ const ProjectList = ({ projects, selectedProjectId, onSelectProject }) => {
         {projects.map(project => (
           <button
             key={project.id}
+            // SSS: La clase 'selected' ahora se basa en la prop 'selectedProjectId'
             className={`project-button ${project.id === selectedProjectId ? 'selected' : ''}`}
-            onClick={() => onSelectProject(project.id, project.name)}
+            // SSS: El onClick ahora llama a la función pasada desde App.jsx
+            onClick={() => onSelectProject(project.id)}
           >
             {project.name} ({project.review_task_count})
           </button>
@@ -1093,18 +1518,18 @@ export default ProjectList;
 import React from 'react';
 import TaskItem from './TaskItem';
 
-const TaskDetails = ({ tasks, projectName, isLoading }) => {
+const TaskDetails = ({ tasks, isLoading, categoryName }) => {
   if (isLoading) {
     return <div>Cargando tareas...</div>;
   }
 
   if (!tasks || tasks.length === 0) {
-    return <div>No hay tareas en revisión para este proyecto.</div>;
+    return <div>No hay tareas en la selección actual.</div>;
   }
 
   return (
     <div>
-      <h3>Tareas en Revisión para: {projectName}</h3>
+      <h3>Tareas para: {categoryName}</h3>
       {tasks.map(task => (
         <TaskItem key={task.url} task={task} />
       ))}
@@ -1173,7 +1598,8 @@ const TaskItem = ({ task }) => {
           [LINK]
         </a>
         <h5 className="task-title" onClick={() => setIsExpanded(!isExpanded)}>
-          {task.title}
+          {/* SSS: Se añade el nombre del proyecto para el contexto */}
+          <strong>[{task.project_name}]</strong> {task.title}
         </h5>
       </div>
       {isExpanded && (
@@ -1279,6 +1705,185 @@ function ProjectsPage() {
 }
 export default ProjectsPage;
 
+// --- ./frontend-react/src/pages/TaskDashboardPage.jsx ---
+
+// ./frontend-react/src/App.jsx
+import React, { useState, useEffect } from 'react';
+import { getActiveProjects, getAllTasksByLabel, forceSyncAll, getLastSyncTime, getSyncStatus } from './services/api';
+import ProjectList from './components/ProjectList';
+import TaskDetails from './components/TaskDetails';
+import './App.css';
+
+const TABS = {
+  'Ejecución': 'En Ejecucion',
+  'Revisión': 'PARA REVISIÓN',
+  'Rev. Funcional': 'Revision Funcional',
+};
+
+function TaskDashboardPage() {
+  const [projects, setProjects] = useState([]);
+  const [tasks, setTasks] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [activeTab, setActiveTab] = useState(TABS['Revisión']);
+  const [selectedProjectId, setSelectedProjectId] = useState(null);
+  const [lastSyncTime, setLastSyncTime] = useState(null);
+  const [isBackendSyncing, setIsBackendSyncing] = useState(false);
+
+  const fetchData = async () => {
+    setIsLoading(true);
+    setError('');
+    try {
+      const [projectsData, tasksData, syncTimeData] = await Promise.all([
+        getActiveProjects(activeTab),
+        getAllTasksByLabel(activeTab),
+        getLastSyncTime()
+      ]);
+      
+      setProjects(projectsData);
+      setTasks(tasksData);
+      setLastSyncTime(syncTimeData.last_sync_time);
+      
+    } catch (err) {
+      console.error("Error en fetchData:", err);
+      setError(`Fallo al cargar los datos. Verifique la conexión con la API.`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  // Hook para polling de estado
+  useEffect(() => {
+    const pollSyncStatus = async () => {
+      try {
+        const status = await getSyncStatus();
+        const isCurrentlySyncing = status.is_syncing;
+        if (isBackendSyncing && !isCurrentlySyncing) {
+          fetchData();
+        }
+        setIsBackendSyncing(isCurrentlySyncing);
+      } catch (pollError) {
+        console.error("Error en el polling de estado de sincronización:", pollError);
+        setIsBackendSyncing(false);
+      }
+    };
+    pollSyncStatus();
+    const intervalId = setInterval(pollSyncStatus, 3000);
+    return () => clearInterval(intervalId);
+  }, [isBackendSyncing]);
+
+  // Hook para cargar datos cuando cambia la pestaña
+  useEffect(() => {
+    fetchData();
+  }, [activeTab]);
+
+  // SSS: CORRECCIÓN DE UX FINAL
+  // Este nuevo hook se ejecuta DESPUÉS de que los proyectos han sido actualizados
+  useEffect(() => {
+    if (projects && projects.length > 0) {
+      setSelectedProjectId(projects[0].id); // Seleccionar siempre el primer proyecto
+    } else {
+      setSelectedProjectId(null); // Si no hay proyectos, deseleccionar
+    }
+  }, [projects]); // Dependencia: la lista de proyectos
+
+  const handleForceSync = async () => {
+    setIsBackendSyncing(true);
+    setError('');
+    try {
+      await forceSyncAll();
+    } catch (err) {
+      setError("Fallo al iniciar la sincronización o ya hay una en curso.");
+      setIsBackendSyncing(false);
+    }
+  };
+  
+  const handleSelectProject = (projectId) => {
+    if (selectedProjectId === projectId) {
+      setSelectedProjectId(null);
+    } else {
+      setSelectedProjectId(projectId);
+    }
+  };
+
+  const filteredTasks = selectedProjectId
+    ? tasks.filter(task => task.project_id === selectedProjectId)
+    : []; // SSS: Si no hay proyecto seleccionado, no mostrar ninguna tarea inicialmente.
+  
+  const getCategoryName = () => {
+      return Object.keys(TABS).find(key => TABS[key] === activeTab) || 'Desconocida';
+  }
+
+  const getProjectName = () => {
+      // SSS: CORRECCIÓN - Mostrar "Seleccione un proyecto" si no hay ninguno seleccionado.
+      if (!selectedProjectId) return "Seleccione un proyecto";
+      return projects.find(p => p.id === selectedProjectId)?.name || "Proyecto Desconocido";
+  }
+
+  const renderContent = () => {
+    if (isLoading && !isBackendSyncing) {
+      return <div className="status-message">Cargando datos...</div>;
+    }
+    if (error) {
+      return <div className="status-message error">{error}</div>;
+    }
+    return (
+      <main className="dashboard-layout">
+        <aside className="left-panel">
+          <ProjectList
+            projects={projects}
+            selectedProjectId={selectedProjectId}
+            onSelectProject={handleSelectProject}
+            disabled={isBackendSyncing}
+          />
+        </aside>
+        <section className="right-panel">
+          <TaskDetails
+            tasks={filteredTasks}
+            categoryName={`${getCategoryName()} en: ${getProjectName()}`}
+            isLoading={isLoading || isBackendSyncing}
+          />
+        </section>
+      </main>
+    );
+  };
+
+  return (
+    <div className="container">
+      <header>
+        <h1>📈 Dashboard de Tareas GitLab</h1>
+        <div className="header-controls">
+          <div className="tabs-container">
+            {Object.entries(TABS).map(([displayName, canonicalName]) => (
+              <button
+                key={canonicalName}
+                className={`tab-button ${activeTab === canonicalName ? 'active' : ''}`}
+                onClick={() => setActiveTab(canonicalName)}
+                disabled={isBackendSyncing}
+              >
+                {displayName}
+              </button>
+            ))}
+          </div>
+          <div className="sync-container">
+            <button onClick={handleForceSync} disabled={isBackendSyncing} className="sync-button">
+              {isBackendSyncing ? 'Sincronizando...' : 'Sincronizar Ahora'}
+            </button>
+            {lastSyncTime && (
+              <span className="sync-time">
+                Última Sinc: {new Date(lastSyncTime).toLocaleString()}
+              </span>
+            )}
+          </div>
+        </div>
+      </header>
+      {renderContent()}
+    </div>
+  );
+}
+
+export default TaskDashboardPage;
+
 // --- ./frontend-react/src/pages/TasksPage.jsx ---
 
 import React from 'react';
@@ -1290,38 +1895,89 @@ export default function TasksPage() {
 
 import axios from 'axios';
 
-// La URL base apunta al path que Nginx redirige al backend.
 const apiClient = axios.create({
-  baseURL: '/api',
+  baseURL: '/tareas/api',
 });
 
 /**
- * Obtiene la lista de proyectos que tienen tareas activas en revisión.
+ * Obtiene la lista de proyectos activos para una etiqueta de estado específica.
+ * @param {string} label El nombre canónico de la etiqueta de estado.
  * @returns {Promise<Array>} Una promesa que resuelve a un array de proyectos.
  */
-export const getActiveProjects = async () => {
+export const getActiveProjects = async (label) => {
+  if (!label) return [];
   try {
-    const response = await apiClient.get('/projects/active_from_db');
+    // SSS: CORRECCIÓN CRÍTICA Y FINAL
+    // La petición DEBE incluir el objeto de configuración { params: ... }
+    // para que axios construya la URL correctamente (ej. ...?label=En+Ejecucion)
+    const response = await apiClient.get('/projects/active_from_db', { params: { label } });
     return response.data;
   } catch (error) {
     console.error("Error fetching active projects:", error);
-    throw error; // Propagar el error para que el componente lo maneje
+    throw error;
   }
 };
 
 /**
- * Obtiene las tareas para un ID de proyecto específico.
+ * Obtiene las tareas para un ID de proyecto y una etiqueta de estado específicos.
  * @param {number} projectId El ID del proyecto.
+ * @param {string} label El nombre canónico de la etiqueta de estado.
  * @returns {Promise<Array>} Una promesa que resuelve a un array de tareas.
  */
-export const getTasksForProject = async (projectId) => {
-  if (!projectId) return []; // No hacer la llamada si no hay ID
+export const getTasksForProject = async (projectId, label) => {
+  if (!projectId || !label) return [];
   try {
-    const response = await apiClient.get(`/projects/${projectId}/tasks_from_db`);
+    const response = await apiClient.get(`/projects/${projectId}/tasks_from_db`, { params: { label } });
     return response.data;
   } catch (error) {
-    console.error(`Error fetching tasks for project ${projectId}:`, error);
+    console.error(`Error fetching tasks for project ${projectId} and label ${label}:`, error);
     throw error;
+  }
+};
+
+/**
+ * Obtiene TODAS las tareas para una etiqueta de estado específica, de todos los proyectos.
+ * @param {string} label El nombre canónico de la etiqueta de estado.
+ * @returns {Promise<Array>} Una promesa que resuelve a un array de tareas enriquecidas.
+ */
+export const getAllTasksByLabel = async (label) => {
+  if (!label) return [];
+  try {
+    const response = await apiClient.get('/tasks/all_by_label', { params: { label } });
+    return response.data;
+  } catch (error) {
+    console.error(`Error fetching all tasks for label ${label}:`, error);
+    throw error;
+  }
+};
+
+export const forceSyncAll = async () => {
+  try {
+    const response = await apiClient.post('/sync/all');
+    return response.data;
+  } catch (error) {
+    console.error("Error forcing sync:", error);
+    throw error;
+  }
+};
+
+export const getLastSyncTime = async () => {
+  try {
+    const response = await apiClient.get('/sync/last_time');
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching last sync time:", error);
+    throw error;
+  }
+};
+
+export const getSyncStatus = async () => {
+  try {
+    const response = await apiClient.get('/sync/status');
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching sync status:", error);
+    return { is_syncing: false };
   }
 };
 
@@ -1353,21 +2009,21 @@ stdout_logfile_maxbytes=0
 
 // --- ./frontend-react/vite.config.js ---
 
-// /frontend-react/vite.config.js
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  // SSS: Directiva CRÍTICA para el despliegue en subdirectorio.
+  // Esto asegura que todas las rutas de assets (JS, CSS, etc.) se generen
+  // con el prefijo /tareas/.
+  base: '/tareas/',
+
   server: {
     host: '0.0.0.0', 
     port: 3000,
-    
-    // SSS: Corrección Crítica para Hot Reloading a través de un proxy Docker.
-    // Esto le dice al cliente de Vite que use WebSockets para comunicarse
-    // con el servidor, lo cual es más robusto detrás de Nginx.
     hmr: {
-      clientPort: 8503, // El puerto que el NAVEGADOR ve
+      clientPort: 8503,
       protocol: 'ws',
     },
   },
@@ -1970,12 +2626,16 @@ server {
     listen 80;
     server_name localhost;
 
-    location /api {
+    location /tareas/api/ {
+        rewrite ^/tareas(/.*)$ $1 break;
         proxy_pass http://backend:8001;
-        # ... cabeceras proxy ...
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forward-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    location / {
+    location /tareas/ {
         proxy_pass http://frontend-react:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;

@@ -3,5 +3,6 @@ uvicorn[standard]
 requests
 python-dotenv
 SQLAlchemy
-aiosqlite
+psycopg2-binary
+pandas
 pypandoc
