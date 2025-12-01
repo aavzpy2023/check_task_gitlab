@@ -85,3 +85,14 @@ export const getSyncStatus = async () => {
     return { is_syncing: false };
   }
 };
+
+export const forceSyncProject = async (projectId) => {
+  if (!projectId) throw new Error("Project ID is required for sync.");
+  try {
+    const response = await apiClient.post(`/sync/project/${projectId}`);
+    return response.data;
+  } catch (error) {
+    console.error(`Error forcing sync for project ${projectId}:`, error);
+    throw error;
+  }
+};

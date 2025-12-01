@@ -1,6 +1,7 @@
 // ./frontend-react/src/App.jsx
 import React, { useState, useEffect } from 'react';
-import { getActiveProjects, getAllTasksByLabel, forceSyncAll, getLastSyncTime, getSyncStatus } from './services/api';
+// import { getActiveProjects, getAllTasksByLabel, forceSyncAll, getLastSyncTime, getSyncStatus } from './services/api';
+import { getAllTasksByLabel, forceSyncAll, forceSyncProject, getLastSyncTime, getSyncStatus } from './services/api';
 import ProjectList from './components/ProjectList';
 import TaskDetails from './components/TaskDetails';
 import './App.css';
@@ -79,13 +80,20 @@ function App() {
   }, [projects]); // Dependencia: la lista de proyectos
 
   const handleForceSync = async () => {
-    setIsBackendSyncing(true);
     setError('');
+    setIsSyncing(true); // Feedback inmediato UI
     try {
-      await forceSyncAll();
+      if (selectedProjectId) {
+        console.log(`Iniciando sincronización para proyecto único: ${selectedProjectId}`);
+        await forceSyncProject(selectedProjectId);
+      } else {
+        console.log("Iniciando sincronización global (Todos los proyectos)");
+        await forceSyncAll();
+      }
     } catch (err) {
-      setError("Fallo al iniciar la sincronización o ya hay una en curso.");
-      setIsBackendSyncing(false);
+      console.error(err);
+      setError("Fallo al iniciar la sincronización. Verifique si ya hay una en curso.");
+      setIsSyncing(false);
     }
   };
   

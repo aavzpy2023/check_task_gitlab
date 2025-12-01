@@ -148,6 +148,35 @@ def sync_single_project(project_id: int, db: Session):
     if tasks_to_insert:
         db.execute(pg_insert(GitLabTaskDB).values(tasks_to_insert))
 
+def run_single_project_sync_wrapper(project_id: int):
+    global SYNC_IN_PROGRESS
+    if SYNC_IN_PROGRESS:
+        print(f"--- [SYNC] Salto: Sincronización en progreso. No se puede iniciar para proyecto {project_id}.")
+        return
+
+    try:
+        SYNC_IN_PROGRESS = True
+        print(f"--- [SYNC] Iniciando sincronización ÚNICA para proyecto {project_id}... ---")
+        
+        # Creamos una sesión dedicada para esta tarea
+        db = SessionLocal()
+        try:
+            # Usamos una transacción explícita
+            with db.begin():
+                sync_single_project(project_id, db)
+                
+                # Actualizamos la marca de tiempo global también para reflejar actividad
+                stmt = pg_insert(SystemMetadata).values(key="singleton", last_sync_time=func.now()).on_conflict_do_update(index_elements=['key'], set_={'last_sync_time': func.now()})
+                db.execute(stmt)
+        except Exception as e:
+            print(f"--- [SYNC] 🚨 Error en sincronización de proyecto {project_id}: {e}")
+        finally:
+            db.close()
+            
+        print(f"--- [SYNC] ✅ Sincronización de proyecto {project_id} finalizada.")
+    finally:
+        SYNC_IN_PROGRESS = False
+
 def run_full_sync(db: Session):
     global SYNC_IN_PROGRESS
     if SYNC_IN_PROGRESS: return
@@ -261,5 +290,10 @@ def get_all_tasks_by_label(label: TaskStatus = Query(...), db: Session = Depends
         task_list.append(TaskWithProject(project_id=issue.get("project_id"), title=issue.get("title", "N/A"), description=issue.get("description"), author=issue.get("author", {}).get("name", "N/A"), url=issue.get("web_url", "#"), assignee=assignee, milestone=milestone, project_name=project_name, created_at=issue.get("created_at"), labels=issue.get("labels", []), time_stats=time_stats_obj))
     return task_list
 
-# Endpoints Wiki omitidos por brevedad si no son usados, o se asume que están. 
-# (Si los necesitas, avísame, pero el error actual es de arranque, no de estos endpoints)
+@app.post("/sync/project/{project_id}", status_code=202, tags=["Database Sync"])
+def force_single_project_sync(project_id: int, background_tasks: BackgroundTasks):
+    if SYNC_IN_PROGRESS: 
+        raise HTTPException(status_code=409, detail="Una sincronización ya está en progreso.")
+    
+    background_tasks.add_task(run_single_project_sync_wrapper, project_id)
+    return {"message": f"Sincronización iniciada para el proyecto {project_id}."}
