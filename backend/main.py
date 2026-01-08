@@ -9,6 +9,8 @@ from contextlib import asynccontextmanager
 from threading import Thread
 from typing import Dict, List, Optional
 from collections import defaultdict
+from sqlalchemy.dialects.postgresql import JSONB
+from datetime import datetime, timezone
 
 import pandas as pd
 import pypandoc
@@ -75,6 +77,12 @@ class GitLabTaskDB(Base):
     task_status_label = Column(String(50), nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True))
     raw_data = Column(JSONB)
+    cycle_metrics = Column(JSONB, default={}) 
+
+class CycleMetrics(BaseModel):
+    execution_days: int = 0
+    review_days: int = 0
+    functional_days: int = 0
 
 class TimeStats(BaseModel):
     human_time_estimate: Optional[str] = None
@@ -89,8 +97,10 @@ class Task(BaseModel):
     assignee: Optional[str] = None
     milestone: Optional[str] = None
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
     labels: List[str] = []
     time_stats: TimeStats = Field(default_factory=TimeStats)
+    cycle_metrics: CycleMetrics = Field(default_factory=CycleMetrics) 
 
 class TaskWithProject(Task):
     project_name: str
@@ -110,6 +120,61 @@ def gitlab_api_request(method: str, endpoint: str, **kwargs) -> Optional[request
         return response
     except requests.exceptions.RequestException:
         return None
+
+def calculate_cycle_metrics_logic(issue_data, project_id, issue_iid):
+    """
+    Consulta el historial de eventos para calcular días en cada etapa.
+    """
+    # 1. Obtener eventos de etiquetas (Requiere llamada extra a API)
+    # Nota: Usamos el endpoint de resource_label_events
+    events_resp = gitlab_api_request("get", f"projects/{project_id}/issues/{issue_iid}/resource_label_events")
+    events = events_resp.json() if events_resp else []
+
+    # 2. Definir hitos temporales
+    created_at = datetime.fromisoformat(issue_data['created_at'].replace('Z', '+00:00'))
+    now = datetime.now(timezone.utc)
+    
+    t_start_review = None
+    t_start_functional = None
+
+    # 3. Buscar cuándo ocurrieron los cambios de estado (tomamos el PRIMER evento)
+    # Buscamos variaciones de etiquetas definidas en LABEL_MAPPING
+    review_labels = set(l for sublist in LABEL_MAPPING[TaskStatus.QA_REVIEW] for l in sublist)
+    func_labels = set(l for sublist in LABEL_MAPPING[TaskStatus.FUNCTIONAL_REVIEW] for l in sublist)
+
+    # Ordenar eventos cronológicamente
+    events.sort(key=lambda x: x['created_at'])
+
+    for e in events:
+        if e['action'] == 'add' and e.get('label'):
+            label_name = e['label']['name']
+            event_time = datetime.fromisoformat(e['created_at'].replace('Z', '+00:00'))
+            
+            if label_name in review_labels and t_start_review is None:
+                t_start_review = event_time
+            
+            if label_name in func_labels and t_start_functional is None:
+                t_start_functional = event_time
+
+    # 4. Calcular deltas en DÍAS
+    metrics = {"execution_days": 0, "review_days": 0, "functional_days": 0}
+
+    # Calculo Ejecución (Creación -> Revisión)
+    end_execution = t_start_review if t_start_review else now
+    metrics["execution_days"] = (end_execution - created_at).days
+
+    # Calculo Revisión (Revisión -> Funcional)
+    if t_start_review:
+        end_review = t_start_functional if t_start_functional else now
+        # Si t_start_functional es anterior a t_start_review (error de flujo), asumimos 0
+        if end_review > t_start_review:
+            metrics["review_days"] = (end_review - t_start_review).days
+
+    # Calculo Funcional (Funcional -> Ahora)
+    if t_start_functional:
+        metrics["functional_days"] = (now - t_start_functional).days
+
+    return metrics
 
 def sync_single_project(project_id: int, db: Session):
     tasks_found = defaultdict(list)
@@ -134,17 +199,21 @@ def sync_single_project(project_id: int, db: Session):
 
     if not tasks_found:
         return
-
+    
     tasks_to_insert = []
     for task_id, found_states in tasks_found.items():
         chosen_state = None
         if any(s['status'] == TaskStatus.FUNCTIONAL_REVIEW for s in found_states): chosen_state = TaskStatus.FUNCTIONAL_REVIEW
         elif any(s['status'] == TaskStatus.QA_REVIEW for s in found_states): chosen_state = TaskStatus.QA_REVIEW
         elif any(s['status'] == TaskStatus.IN_PROGRESS for s in found_states): chosen_state = TaskStatus.IN_PROGRESS
+             
         if chosen_state:
             final_task_data = next(s['data'] for s in found_states if s['status'] == chosen_state)
-            tasks_to_insert.append({"task_id": task_id, "project_id": final_task_data["project_id"], "task_status_label": chosen_state.value, "updated_at": final_task_data["updated_at"], "raw_data": final_task_data})
-
+            issue_iid = final_task_data.get("iid")
+            metrics = calculate_cycle_metrics_logic(final_task_data, project_id, issue_iid)
+            tasks_to_insert.append({"task_id": task_id, "project_id": final_task_data["project_id"], "task_status_label": chosen_state.value, "updated_at": final_task_data["updated_at"], "raw_data": final_task_data, "cycle_metrics": metrics})
+        
+    
     if tasks_to_insert:
         db.execute(pg_insert(GitLabTaskDB).values(tasks_to_insert))
 
@@ -283,11 +352,49 @@ def get_active_projects_from_db(label: TaskStatus = Query(...), db: Session = De
 
 @app.get("/tasks/all_by_label", response_model=List[TaskWithProject], tags=["Task Dashboard (DB)"])
 def get_all_tasks_by_label(label: TaskStatus = Query(...), db: Session = Depends(get_db)):
-    db_tasks = db.query(GitLabTaskDB, MonitoredProject.project_name).join(MonitoredProject, GitLabTaskDB.project_id == MonitoredProject.project_id).filter(GitLabTaskDB.task_status_label == label.value).order_by(MonitoredProject.project_name, GitLabTaskDB.updated_at.desc()).all()
+    # 1. Consulta optimizada y formateada para legibilidad
+    db_tasks = db.query(GitLabTaskDB, MonitoredProject.project_name)\
+        .join(MonitoredProject, GitLabTaskDB.project_id == MonitoredProject.project_id)\
+        .filter(GitLabTaskDB.task_status_label == label.value)\
+        .order_by(MonitoredProject.project_name, GitLabTaskDB.updated_at.desc())\
+        .all()
+    
     task_list = []
     for db_task, project_name in db_tasks:
-        issue = db_task.raw_data; assignee = issue.get("assignees", [{}])[0].get("name") if issue.get("assignees") else None; milestone = issue.get("milestone", {}).get("title") if issue.get("milestone") else None; raw_time_stats = issue.get("time_stats", {}) or {}; time_stats_obj = TimeStats(human_time_estimate=raw_time_stats.get("human_time_estimate"), human_total_time_spent=raw_time_stats.get("human_total_time_spent"))
-        task_list.append(TaskWithProject(project_id=issue.get("project_id"), title=issue.get("title", "N/A"), description=issue.get("description"), author=issue.get("author", {}).get("name", "N/A"), url=issue.get("web_url", "#"), assignee=assignee, milestone=milestone, project_name=project_name, created_at=issue.get("created_at"), labels=issue.get("labels", []), time_stats=time_stats_obj))
+        issue = db_task.raw_data
+        
+        # 2. Extracción de datos limpia (Evitamos una sola línea gigante)
+        assignee = issue.get("assignees", [{}])[0].get("name") if issue.get("assignees") else None
+        milestone = issue.get("milestone", {}).get("title") if issue.get("milestone") else None
+        
+        raw_time_stats = issue.get("time_stats", {}) or {}
+        time_stats_obj = TimeStats(
+            human_time_estimate=raw_time_stats.get("human_time_estimate"), 
+            human_total_time_spent=raw_time_stats.get("human_total_time_spent")
+        )
+
+        # 3. Construcción del objeto de respuesta
+        task_list.append(TaskWithProject(
+            project_id=issue.get("project_id"), 
+            title=issue.get("title", "N/A"), 
+            description=issue.get("description"), 
+            author=issue.get("author", {}).get("name", "N/A"), 
+            url=issue.get("web_url", "#"), 
+            assignee=assignee, 
+            milestone=milestone, 
+            project_name=project_name, 
+            created_at=issue.get("created_at"), 
+            updated_at=issue.get("updated_at"), 
+            labels=issue.get("labels", []), 
+            time_stats=time_stats_obj, 
+            
+            # --- CORRECCIÓN CRÍTICA ---
+            # Antes: b_task.cycle_metrics (Error)
+            # Ahora: db_task.cycle_metrics (Correcto)
+            # Explicación: Usamos 'db_task' que es la variable definida en el 'for'
+            cycle_metrics=db_task.cycle_metrics or {"execution_days": 0, "review_days": 0, "functional_days": 0}
+        ))
+        
     return task_list
 
 @app.post("/sync/project/{project_id}", status_code=202, tags=["Database Sync"])
@@ -297,3 +404,30 @@ def force_single_project_sync(project_id: int, background_tasks: BackgroundTasks
     
     background_tasks.add_task(run_single_project_sync_wrapper, project_id)
     return {"message": f"Sincronización iniciada para el proyecto {project_id}."}
+
+@app.get("/wiki/projects", response_model=List[ProjectSummary], tags=["Wiki"])
+def get_projects_with_wiki(db: Session = Depends(get_db)):
+    """
+    Retorna la lista de proyectos monitoreados para seleccionar cuál wiki ver.
+    """
+    projects = db.query(MonitoredProject).all()
+    # Mapeamos al modelo ProjectSummary con review_task_count en 0 ya que no es relevante aquí
+    return [ProjectSummary(id=p.project_id, name=p.project_name, review_task_count=0) for p in projects]
+
+@app.get("/wiki/projects/{project_id}/pages", tags=["Wiki"])
+def get_wiki_pages_list(project_id: int):
+    """
+    Obtiene la lista de páginas de la wiki para un proyecto específico.
+    """
+    response = http_gitlab_api_request("get", f"projects/{project_id}/wikis")
+    return response.json()
+
+@app.get("/wiki/projects/{project_id}/pages/{slug}", tags=["Wiki"])
+def get_wiki_page_content(project_id: int, slug: str):
+    """
+    Obtiene el contenido de una página específica.
+    """
+    # GitLab requiere que el slug sea URL-encoded si contiene espacios o caracteres especiales
+    safe_slug = urllib.parse.quote(slug, safe='')
+    response = http_gitlab_api_request("get", f"projects/{project_id}/wikis/{safe_slug}")
+    return response.json()

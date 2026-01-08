@@ -96,3 +96,34 @@ export const forceSyncProject = async (projectId) => {
     throw error;
   }
 };
+export const getWikiProjects = async () => {
+  try {
+    const response = await apiClient.get('/wiki/projects');
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching wiki projects:", error);
+    throw error;
+  }
+};
+
+export const getWikiPages = async (projectId) => {
+  try {
+    const response = await apiClient.get(`/wiki/projects/${projectId}/pages`);
+    return response.data;
+  } catch (error) {
+    console.error(`Error fetching wiki pages for project ${projectId}:`, error);
+    throw error;
+  }
+};
+
+export const getWikiPageContent = async (projectId, slug) => {
+  try {
+    // El slug puede venir con espacios, aseguramos codificación
+    const encodedSlug = encodeURIComponent(slug);
+    const response = await apiClient.get(`/wiki/projects/${projectId}/pages/${slug}`);
+    return response.data;
+  } catch (error) {
+    console.error(`Error fetching page content for ${slug}:`, error);
+    throw error;
+  }
+};

@@ -28,3 +28,66 @@
     margin-right: 0.5rem;
     margin-bottom: 0.5rem;
   }
+
+  .task-item-container {
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  background-color: #fff;
+  transition: all 0.3s ease; /* Suavizar la transición */
+}
+
+/* SSS: Estilo para tarea estancada */
+.task-item-container.stale-task {
+  border-left: 5px solid #dc3545; /* Borde izquierdo grueso rojo */
+  border-color: #f5c6cb; /* Borde general ligeramente rojizo */
+  background-color: #fff5f5; /* Fondo rojo muy tenue */
+}
+
+/* Badge de advertencia en el header */
+.stale-badge {
+    margin-left: auto;
+    background-color: #dc3545;
+    color: white;
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: bold;
+}
+
+.task-item-header-wrapper {
+  padding: 0.75rem;
+}
+
+/* Contenedor de la fila superior */
+.task-item-title-row {
+  display: flex;            /* Activa el modo flexible */
+  align-items: flex-start;  /* Alinea al TOPE (importante para multilínea) */
+  gap: 0.75rem;             /* Espacio consistente entre [LINK] y Título */
+  width: 100%;
+}
+
+.task-link {
+  flex-shrink: 0;           /* PROHIBIDO encogerse, mantiene su ancho */
+  font-weight: bold;
+  text-decoration: none;
+  white-space: nowrap;      /* Nunca romper línea dentro del link */
+  margin-top: 2px;          /* Ajuste óptico para alinearse con el texto del título */
+}
+
+* El Título de la tarea */
+.task-title {
+  flex-grow: 1;             /* Toma todo el espacio restante */
+  margin: 0;
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1.4;         /* Mejor lectura en múltiples líneas */
+  word-wrap: break-word;    /* Romper palabras largas si es necesario */
+  min-width: 0;             /* Truco CSS para evitar desbordes en flex items */
+}
+
+/* Ajuste del contenedor de burbujas (Para que no pegue con el borde) */
+.cycle-badges-wrapper {
+    margin-bottom: 8px;
+    padding-left: 2px;
+}

@@ -1,9 +1,16 @@
-// ./frontend-react/src/App.jsx
+// frontend-react/src/pages/TaskDashboardPage.jsx
 import React, { useState, useEffect } from 'react';
-import { getActiveProjects, getAllTasksByLabel, forceSyncAll, getLastSyncTime, getSyncStatus } from './services/api';
-import ProjectList from './components/ProjectList';
-import TaskDetails from './components/TaskDetails';
-import './App.css';
+import { 
+  getActiveProjects, 
+  getAllTasksByLabel, 
+  forceSyncAll, 
+  forceSyncProject, 
+  getLastSyncTime, 
+  getSyncStatus 
+} from '../services/api';
+import ProjectList from '../components/ProjectList';
+import TaskDetails from '../components/TaskDetails';
+import '../App.css'; // Mantenemos los estilos globales por ahora
 
 const TABS = {
   'Ejecución': 'En Ejecucion',
@@ -21,10 +28,12 @@ function TaskDashboardPage() {
   const [lastSyncTime, setLastSyncTime] = useState(null);
   const [isBackendSyncing, setIsBackendSyncing] = useState(false);
 
+  // --- Lógica de Carga de Datos ---
   const fetchData = async () => {
     setIsLoading(true);
     setError('');
     try {
+      // Nota: getActiveProjects ya está importado correctamente arriba
       const [projectsData, tasksData, syncTimeData] = await Promise.all([
         getActiveProjects(activeTab),
         getAllTasksByLabel(activeTab),
@@ -43,76 +52,84 @@ function TaskDashboardPage() {
     }
   };
   
-  // Hook para polling de estado
+  // --- Polling de Estado de Sincronización ---
   useEffect(() => {
     const pollSyncStatus = async () => {
       try {
         const status = await getSyncStatus();
         const isCurrentlySyncing = status.is_syncing;
+        
+        // Si terminó de sincronizar, recargamos los datos automáticamente
         if (isBackendSyncing && !isCurrentlySyncing) {
           fetchData();
         }
         setIsBackendSyncing(isCurrentlySyncing);
       } catch (pollError) {
-        console.error("Error en el polling de estado de sincronización:", pollError);
-        setIsBackendSyncing(false);
+        console.error("Error polling sync status:", pollError);
       }
     };
-    pollSyncStatus();
-    const intervalId = setInterval(pollSyncStatus, 3000);
+    
+    pollSyncStatus(); // Check inicial
+    const intervalId = setInterval(pollSyncStatus, 3000); // Check cada 3s
     return () => clearInterval(intervalId);
   }, [isBackendSyncing]);
 
-  // Hook para cargar datos cuando cambia la pestaña
+  // --- Efecto al cambiar de pestaña ---
   useEffect(() => {
     fetchData();
   }, [activeTab]);
 
-  // SSS: CORRECCIÓN DE UX FINAL
-  // Este nuevo hook se ejecuta DESPUÉS de que los proyectos han sido actualizados
+  // --- Efecto de Selección Automática de Proyecto ---
   useEffect(() => {
     if (projects && projects.length > 0) {
-      setSelectedProjectId(projects[0].id); // Seleccionar siempre el primer proyecto
+      // Si el proyecto seleccionado ya no existe en la lista, seleccionar el primero
+      const exists = projects.find(p => p.id === selectedProjectId);
+      if (!selectedProjectId || !exists) {
+        setSelectedProjectId(projects[0].id);
+      }
     } else {
-      setSelectedProjectId(null); // Si no hay proyectos, deseleccionar
+      setSelectedProjectId(null);
     }
-  }, [projects]); // Dependencia: la lista de proyectos
+  }, [projects]);
 
+  // --- Handlers ---
   const handleForceSync = async () => {
-    setIsBackendSyncing(true);
     setError('');
+    setIsBackendSyncing(true); // Feedback UI inmediato
     try {
-      await forceSyncAll();
+      if (selectedProjectId) {
+        await forceSyncProject(selectedProjectId);
+      } else {
+        await forceSyncAll();
+      }
     } catch (err) {
-      setError("Fallo al iniciar la sincronización o ya hay una en curso.");
-      setIsBackendSyncing(false);
+      console.error(err);
+      setError("Fallo al iniciar la sincronización. Verifique si ya hay una en curso.");
+      setIsBackendSyncing(false); // Revertir estado si falla el inicio
     }
   };
   
   const handleSelectProject = (projectId) => {
-    if (selectedProjectId === projectId) {
-      setSelectedProjectId(null);
-    } else {
-      setSelectedProjectId(projectId);
-    }
+    setSelectedProjectId(prev => (prev === projectId ? null : projectId));
   };
 
+  // --- Filtrado de Tareas ---
   const filteredTasks = selectedProjectId
     ? tasks.filter(task => task.project_id === selectedProjectId)
-    : []; // SSS: Si no hay proyecto seleccionado, no mostrar ninguna tarea inicialmente.
+    : [];
   
   const getCategoryName = () => {
       return Object.keys(TABS).find(key => TABS[key] === activeTab) || 'Desconocida';
   }
 
   const getProjectName = () => {
-      // SSS: CORRECCIÓN - Mostrar "Seleccione un proyecto" si no hay ninguno seleccionado.
       if (!selectedProjectId) return "Seleccione un proyecto";
       return projects.find(p => p.id === selectedProjectId)?.name || "Proyecto Desconocido";
   }
 
-  const renderContent = () => {
-    if (isLoading && !isBackendSyncing) {
+  // --- Renderizado Condicional del Contenido Principal ---
+  const renderMainContent = () => {
+    if (isLoading && !isBackendSyncing && tasks.length === 0) {
       return <div className="status-message">Cargando datos...</div>;
     }
     if (error) {
@@ -140,7 +157,7 @@ function TaskDashboardPage() {
   };
 
   return (
-    <div className="container">
+    <div className="dashboard-container">
       <header>
         <h1>📈 Dashboard de Tareas GitLab</h1>
         <div className="header-controls">
@@ -168,7 +185,7 @@ function TaskDashboardPage() {
           </div>
         </div>
       </header>
-      {renderContent()}
+      {renderMainContent()}
     </div>
   );
 }
