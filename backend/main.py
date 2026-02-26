@@ -1,6 +1,8 @@
 # backend/main.py
 import enum
 import os
+
+import re
 import sys
 import tempfile
 import time
@@ -33,6 +35,7 @@ from sqlalchemy import (
     Boolean,
     UniqueConstraint,
     case,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -228,6 +231,18 @@ def fetch_and_store_wiki_events(project_id: int, month: int, year: int, db: Sess
     start_date = datetime(year, month, 1, tzinfo=timezone.utc)
     end_date = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
 
+    db.query(AuditEventDB).filter(
+        AuditEventDB.project_id == project_id,
+        AuditEventDB.event_month == month,
+        AuditEventDB.event_year == year,
+        AuditEventDB.event_type.in_([
+            AuditEventType.UC_CREATED.value, AuditEventType.UC_UPDATED.value,
+            AuditEventType.MANUAL_CREATED.value, AuditEventType.MANUAL_UPDATED.value,
+            AuditEventType.PUSH_EVENT.value
+        ])
+    ).delete(synchronize_session=False)
+    db.commit()
+
     page = 1
     while True:
         # Petición a Eventos: Solo del mes seleccionado y sin filtrar target_type
@@ -282,36 +297,47 @@ def fetch_and_store_wiki_events(project_id: int, month: int, year: int, db: Sess
                 commit_title_raw = push_data.get("commit_title") or "Sin mensaje"
                 commit_title = commit_title_raw.lower()
 
-                # Evaluar heurística sobre el MENSAJE DEL COMMIT
-                # Evaluar heurística sobre el MENSAJE DEL COMMIT
-                is_manual = "manual" in commit_title or "guia" in commit_title or "guía" in commit_title
-                words = commit_title.split()
-                is_cu = "caso" in words or "casos" in words or "use case" in commit_title or "cu" in words or ".cu" in commit_title
-                if not is_cu:
-                    is_cu = any(f"cu{i}" in commit_title for i in range(10))
+                # 1. Filtro Anti-Desarrollador (Código):
+                # Si la rama o el commit mencionan correcciones, bloqueamos la clasificación de documentación.
+                is_code_smell = re.search(r'\b(incidencia|bug|fix|hotfix|error|exception|refactor|merge)\b',
+                                          commit_title) or any(
+                    x in ref.lower() for x in ['hotfix', 'bugfix', 'fix/', 'feature/'])
+
+                # 2. Heurística estricta usando RegEx:
+                is_manual_match = re.search(r'\b(manual|guia|guía)\b', commit_title)
+
+                # Exige que 'cu' esté pegado a un número (ej. cu07, cu 08, 12cu, 02.29.cu07.2.5)
+                # para evitar atrapar extensiones de dominio como '.cu' en gitlab.azcuba.cu
+                is_cu_match = re.search(
+                    r'\b(caso de uso|casos de uso|casos de usos|use case)\b|\b\d+[\.\-_]?cu\b|\bcu[\.\-_\s]?\d+',
+                    commit_title)
+
+                # 3. Clasificación dinámica:
+                is_manual = bool(is_manual_match) and not is_code_smell
+                is_cu = bool(is_cu_match) and not is_code_smell
 
                 # --- NUEVA REGLA: ¿Es Creación o Actualización? ---
-                is_creation = "nuevo" in commit_title or "cread" in commit_title or "add" in commit_title or "agregar" in commit_title
-
+                is_creation = bool(re.search(r'\b(nuevo|cread|add|agregar|añadir)\b', commit_title))
                 # Clasificación dinámica basada en el mensaje
                 if is_manual:
                     evt_type = AuditEventType.MANUAL_CREATED.value if is_creation else AuditEventType.MANUAL_UPDATED.value
-                    prefix = "[Push: Manual]"
+                    # Extraemos el slug exacto para agrupar múltiples ediciones de consola en una sola
+                    ref_id = is_manual_match.group(0).lower().replace(' ', '-')
                 elif is_cu:
                     evt_type = AuditEventType.UC_CREATED.value if is_creation else AuditEventType.UC_UPDATED.value
-                    prefix = "[Push: CU]"
+                    ref_id = is_cu_match.group(0).lower().replace(' ', '-')
                 else:
                     evt_type = AuditEventType.PUSH_EVENT.value
-                    prefix = "[Push: General]"
-
-                # Guardamos el mensaje original en la referencia para la Vista de Detalle
-                ref_id = f"{prefix} {commit_title_raw} ({commit_count} commits -> {ref})"
+                    ref_id = f"[Push: General] {commit_title_raw} ({commit_count} commits -> {ref})"
 
                 stmt = pg_insert(AuditEventDB).values(
                     project_id=project_id, username=author, event_date=event_date,
                     event_month=month, event_year=year, event_type=evt_type,
                     reference_id=ref_id
-                ).on_conflict_do_nothing()
+                ).on_conflict_do_update(
+                    index_elements=['project_id', 'event_type', 'reference_id', 'username'],
+                    set_={'event_date': event_date}
+                )
                 db.execute(stmt)
                 continue
 
@@ -324,14 +350,10 @@ def fetch_and_store_wiki_events(project_id: int, month: int, year: int, db: Sess
             slug = (wiki_page_data.get("slug") or "").lower()
 
             combined_text = f"{title} {slug}".replace('_', ' ').replace('-', ' ').replace('/', ' ')
-            words = combined_text.split()
-
-            is_manual = "manual" in combined_text or "guia" in combined_text or "guía" in combined_text
-            is_cu = "caso" in words or "casos" in words or "use case" in combined_text or "cu" in words or ".cu" in combined_text
-
-            if not is_cu:
-                is_cu = any(f"cu{i}" in combined_text for i in range(10))
-
+            is_manual = bool(re.search(r'\b(manual|guia|guía)\b', combined_text))
+            is_cu = bool(
+                re.search(r'\b(caso de uso|casos de uso|casos de usos|use case)\b|\b\d+[\.\-_]?cu\b|\bcu[\.\-_\s]?\d+',
+                          combined_text))
             if is_manual:
                 evt_type = AuditEventType.MANUAL_CREATED.value if action == "created" else AuditEventType.MANUAL_UPDATED.value
             elif is_cu:
@@ -353,6 +375,20 @@ def fetch_and_store_wiki_events(project_id: int, month: int, year: int, db: Sess
             db.execute(stmt)
 
         page += 1
+        db.execute(text("""
+                DELETE FROM audit_events a
+                USING audit_events b
+                WHERE a.project_id = b.project_id
+                  AND a.username = b.username
+                  AND a.event_month = b.event_month
+                  AND a.event_year = b.event_year
+                  AND a.reference_id = b.reference_id
+                  AND ((a.event_type = 'UC_UPDATED' AND b.event_type = 'UC_CREATED') 
+                    OR (a.event_type = 'MANUAL_UPDATED' AND b.event_type = 'MANUAL_CREATED'))
+                  AND a.project_id = :pid
+                  AND a.event_month = :month
+                  AND a.event_year = :year
+            """), {"pid": project_id, "month": month, "year": year})
     db.commit()
 
 
@@ -846,7 +882,8 @@ def get_wiki_details(month: int = Query(...), year: int = Query(...), db: Sessio
         AuditEventDB.event_type.in_([
             AuditEventType.UC_CREATED.value, AuditEventType.UC_UPDATED.value,
             AuditEventType.MANUAL_CREATED.value, AuditEventType.MANUAL_UPDATED.value,
-            AuditEventType.PUSH_EVENT.value
+            AuditEventType.PUSH_EVENT.value,
+            AuditEventType.ISSUE_RAISED.value, AuditEventType.ISSUE_REVIEWED.value
         ])
     ).order_by(AuditEventDB.event_date.desc()).all()
 

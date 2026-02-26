@@ -28,6 +28,9 @@ const AuditPage = () => {
   const[wikiDetails, setWikiDetails] = useState([]);
   const [expandedRows, setExpandedRows] = useState([]);
 
+  const [showWiki, setShowWiki] = useState(true);
+  const [showCode, setShowCode] = useState(true);
+
   const toggleRow = (username) => {
     setExpandedRows(prev =>
       prev.includes(username) ? prev.filter(u => u !== username) : [...prev, username]
@@ -41,6 +44,9 @@ const AuditPage = () => {
       case 'MANUAL_CREATED': return { label: 'Manual (Creado)', bg: '#cce5ff', color: '#004085' };
       case 'MANUAL_UPDATED': return { label: 'Manual (Actualizado)', bg: '#e2e3e5', color: '#383d41' };
       case 'PUSH_EVENT': return { label: 'Git Push (Terminal)', bg: '#f3e8ff', color: '#6f42c1' };
+      case 'ISSUE_RAISED': return { label: 'Issue (Levantada)', bg: '#ffeeba', color: '#856404' };
+      case 'ISSUE_REVIEWED': return { label: 'Issue (Revisada)', bg: '#d1ecf1', color: '#0c5460' };
+      case 'ISSUE_BOTH': return { label: 'Issue (Levantada y Revisada)', bg: '#e2e3e5', color: '#383d41' };
       default: return { label: type, bg: '#f8f9fa', color: '#212529' };
     }
   };
@@ -108,16 +114,17 @@ const AuditPage = () => {
     if (!auditData || auditData.length === 0) return;
 
     const headers =[
-      'Usuario', 'Issues Levantadas', 'Issues Revisadas',
-      'Rev. en Tiempo', 'CU Creados', 'CU Actualizados',
-      'Man. Creados', 'Man. Actualizados', 'Pushes (Terminal)'
+      'Usuario', 'Issues Levantadas', 'Issues Revisadas', 'Rev. en Tiempo'
     ];
+    if (showWiki) headers.push('CU Creados', 'CU Actualizados', 'Man. Creados', 'Man. Actualizados');
+    if (showCode) headers.push('Pushes (Terminal)');
 
-    const rows = auditData.map(w =>[
-      w.username, w.issues_raised, w.issues_reviewed,
-      w.issues_reviewed_on_time, w.uc_created, w.uc_updated,
-      w.manual_created, w.manual_updated, w.total_pushes || 0
-    ]);
+    const rows = auditData.map(w => {
+      const row =[w.username, w.issues_raised, w.issues_reviewed, w.issues_reviewed_on_time];
+      if (showWiki) row.push(w.uc_created, w.uc_updated, w.manual_created, w.manual_updated);
+      if (showCode) row.push(w.total_pushes || 0);
+      return row;
+    });
 
     const csvContent =[headers.join(',')]
       .concat(rows.map(row => row.join(',')))
@@ -190,6 +197,27 @@ const AuditPage = () => {
         </div>
       </section>
 
+        <section className="filter-controls" style={{ marginBottom: '1.5rem', display: 'flex', gap: '2rem', padding: '1rem', backgroundColor: '#fff', borderRadius: '4px', border: '1px solid #dee2e6' }}>
+        <label style={{ cursor: 'pointer', fontWeight: 'bold' }}>
+          <input
+            type="checkbox"
+            checked={showWiki}
+            onChange={(e) => setShowWiki(e.target.checked)}
+            style={{ marginRight: '0.5rem' }}
+          />
+          📘 Mostrar Actividad Wiki (CU y Manuales)
+        </label>
+        <label style={{ cursor: 'pointer', fontWeight: 'bold', color: '#6f42c1' }}>
+          <input
+            type="checkbox"
+            checked={showCode}
+            onChange={(e) => setShowCode(e.target.checked)}
+            style={{ marginRight: '0.5rem' }}
+          />
+          💻 Mostrar Actividad de Código (Git Pushes)
+        </label>
+      </section>
+
       {error && (
         <div className="status-message error">
           <p>⚠️ {error}</p>
@@ -211,20 +239,65 @@ const AuditPage = () => {
       {!isSyncing && !loading && auditData.length > 0 && (
         <table style={{ width: '100%', borderCollapse: 'collapse', backgroundColor: '#fff', fontSize: '0.95rem' }}>
           <thead>
-            <tr style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #dee2e6' }}>
+            <tr style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #dee2e6', fontSize: '0.85rem' }}>
               <th style={{ padding: '1rem', textAlign: 'left' }}>Usuario</th>
               <th style={{ padding: '1rem', textAlign: 'center' }}>Issues Levantadas</th>
               <th style={{ padding: '1rem', textAlign: 'center' }}>Issues Revisadas</th>
               <th style={{ padding: '1rem', textAlign: 'center' }}>Rev. en Tiempo (≤3d)</th>
-              <th style={{ padding: '1rem', textAlign: 'center' }}>CU Creados</th>
-              <th style={{ padding: '1rem', textAlign: 'center' }}>Man. Actualizados</th>
-              <th style={{ padding: '1rem', textAlign: 'center', color: '#6f42c1' }}>Pushes</th>
+               {showWiki && (
+                <>
+                  <th style={{ padding: '1rem', textAlign: 'center' }}>CU Creados</th>
+                  <th style={{ padding: '1rem', textAlign: 'center' }}>CU Actualizados</th>
+                  <th style={{ padding: '1rem', textAlign: 'center' }}>Man. Creados</th>
+                  <th style={{ padding: '1rem', textAlign: 'center' }}>Man. Actualizados</th>
+                </>
+              )}
+              {showCode && (
+                <th style={{ padding: '1rem', textAlign: 'center', color: '#6f42c1' }} title="Subidas directas por consola ignorando interfaz gráfica">Git Pushes (Terminal)</th>
+              )}
             </tr>
           </thead>
           <tbody>
             {auditData.map((worker) => {
+                const hasIssues = worker.issues_raised > 0 || worker.issues_reviewed > 0;
+              const hasWiki = worker.uc_created > 0 || worker.uc_updated > 0 || worker.manual_created > 0 || worker.manual_updated > 0;
+              const hasCode = (worker.total_pushes || 0) > 0;
+
+              if (!hasIssues && (!showWiki || !hasWiki) && (!showCode || !hasCode)) {
+                return null;
+              }
               const isExpanded = expandedRows.includes(worker.username);
-              const userWikiDetails = wikiDetails.filter(d => d.username === worker.username);
+              const userAllDetails = wikiDetails.filter(d => d.username === worker.username);
+
+              // 1. Separar Issues y Wiki/Código
+              const issueEvents = userAllDetails.filter(d => ['ISSUE_RAISED', 'ISSUE_REVIEWED'].includes(d.event_type));
+              const wikiCodeEvents = userAllDetails.filter(d => !['ISSUE_RAISED', 'ISSUE_REVIEWED'].includes(d.event_type));
+
+              // 2. Filtrar Wiki/Código según los checkboxes
+              const filteredWikiCode = wikiCodeEvents.filter(d => {
+                const isCodeEvent = d.event_type === 'PUSH_EVENT';
+                if (!showCode && isCodeEvent) return false;
+                if (!showWiki && !isCodeEvent) return false;
+                return true;
+              });
+
+              // 3. Deduplicar Issues (Si levantó y revisó la misma issue, agrupar)
+              const issueMap = {};
+              issueEvents.forEach(e => {
+                const key = `${e.project_name}-${e.reference_id}`;
+                if (!issueMap[key]) {
+                  issueMap[key] = { ...e };
+                } else {
+                  issueMap[key].event_type = 'ISSUE_BOTH'; // Combinar estados
+                  if (new Date(e.event_date) > new Date(issueMap[key].event_date)) {
+                    issueMap[key].event_date = e.event_date; // Mantener la fecha más reciente
+                  }
+                }
+              });
+              const deduplicatedIssues = Object.values(issueMap).sort((a, b) => new Date(b.event_date) - new Date(a.event_date));
+
+              // 4. Concatenar: Primero Issues, luego Wiki/Código
+              const finalDetailsToShow =[...deduplicatedIssues, ...filteredWikiCode];
 
               return (
                 <React.Fragment key={worker.username}>
@@ -244,36 +317,45 @@ const AuditPage = () => {
                     <td style={{ padding: '1rem', textAlign: 'center', ...getBadgeStyle(worker.issues_reviewed_on_time, worker.issues_reviewed) }}>
                       {worker.issues_reviewed_on_time} / {worker.issues_reviewed}
                     </td>
-                    <td style={{ padding: '1rem', textAlign: 'center' }}>{worker.uc_created}</td>
-                    <td style={{ padding: '1rem', textAlign: 'center' }}>{worker.uc_updated}</td>
-                    <td style={{ padding: '1rem', textAlign: 'center' }}>{worker.manual_created}</td>
-                    <td style={{ padding: '1rem', textAlign: 'center' }}>{worker.manual_updated}</td>
-                    <td style={{ padding: '1rem', textAlign: 'center', fontWeight: 'bold', color: '#6f42c1' }}>{worker.total_pushes || 0}</td>
+                    {showWiki && (
+                      <>
+                        <td style={{ padding: '1rem', textAlign: 'center' }}>{worker.uc_created}</td>
+                        <td style={{ padding: '1rem', textAlign: 'center' }}>{worker.uc_updated}</td>
+                        <td style={{ padding: '1rem', textAlign: 'center' }}>{worker.manual_created}</td>
+                        <td style={{ padding: '1rem', textAlign: 'center' }}>{worker.manual_updated}</td>
+                      </>
+                    )}
+                    {showCode && (
+                      <td style={{ padding: '1rem', textAlign: 'center', fontWeight: 'bold', color: '#6f42c1' }}>{worker.total_pushes || 0}</td>
+                    )}
                   </tr>
 
                   {isExpanded && (
                     <tr style={{ backgroundColor: '#fdfdfd' }}>
-                      <td colSpan="9" style={{ padding: '1.5rem 2rem', borderBottom: '2px solid #dee2e6' }}>
+                      <td colSpan={4 + (showWiki ? 4 : 0) + (showCode ? 1 : 0)} style={{ padding: '1.5rem 2rem', borderBottom: '2px solid #dee2e6' }}>
                         <h5 style={{ marginTop: 0, marginBottom: '1rem', color: '#495057' }}>
-                          📄 Detalle de Actividad (Wiki & Git Pushes) de este mes
+                          📄 Detalle de Actividad (Filtrado según selección superior)
                         </h5>
-                        {userWikiDetails.length > 0 ? (
+                        {finalDetailsToShow.length > 0 ? (
                           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem', backgroundColor: '#fff', border: '1px solid #ced4da', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
                             <thead>
                               <tr style={{ backgroundColor: '#e9ecef' }}>
                                 <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid #ced4da' }}>Proyecto</th>
-                                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid #ced4da' }}>Nombre del Documento (Slug/Título)</th>
+                                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid #ced4da' }}>Elemento / Documento</th>
                                 <th style={{ padding: '0.5rem', textAlign: 'center', borderBottom: '1px solid #ced4da' }}>Clasificación</th>
                                 <th style={{ padding: '0.5rem', textAlign: 'center', borderBottom: '1px solid #ced4da' }}>Fecha Exacta</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {userWikiDetails.map((detail, idx) => {
+                              {finalDetailsToShow.map((detail, idx) => {
                                 const badge = getEventBadge(detail.event_type);
+                                const isIssue = detail.event_type.startsWith('ISSUE');
                                 return (
                                   <tr key={idx}>
                                     <td style={{ padding: '0.5rem', borderBottom: '1px solid #e9ecef' }}>{detail.project_name}</td>
-                                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #e9ecef', fontWeight: 'bold' }}>{detail.reference_id}</td>
+                                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #e9ecef', fontWeight: 'bold' }}>
+                                      {isIssue ? `Issue #${detail.reference_id}` : detail.reference_id}
+                                    </td>
                                     <td style={{ padding: '0.5rem', borderBottom: '1px solid #e9ecef', textAlign: 'center' }}>
                                       <span style={{ padding: '3px 8px', borderRadius: '4px', fontSize: '0.8rem', backgroundColor: badge.bg, color: badge.color, fontWeight: 'bold' }}>
                                         {badge.label}
@@ -289,7 +371,7 @@ const AuditPage = () => {
                           </table>
                         ) : (
                           <p style={{ margin: 0, color: '#6c757d', fontStyle: 'italic' }}>
-                            No hay ediciones de Wiki registradas para este usuario en este mes. (Los pushes que no cumplan la heurística de Manual/CU se ignoran).
+                            No hay actividad detallada (Issues, Wiki o Pushes) para este usuario con los filtros actuales.
                           </p>
                         )}
                       </td>
