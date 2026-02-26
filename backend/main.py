@@ -74,6 +74,7 @@ class AuditEventType(str, enum.Enum):
     UC_UPDATED = "UC_UPDATED"
     MANUAL_CREATED = "MANUAL_CREATED"
     MANUAL_UPDATED = "MANUAL_UPDATED"
+    PUSH_EVENT = "PUSH_EVENT"
 
 class SystemMetadata(Base):
     __tablename__ = "system_metadata"
@@ -152,6 +153,7 @@ class TesterAuditMetrics(BaseModel):
     uc_updated: int = 0
     manual_created: int = 0
     manual_updated: int = 0
+    total_pushes: int = 0
 
 
 # --- Lógica de Sincronización ---
@@ -228,40 +230,128 @@ def fetch_and_store_wiki_events(project_id: int, month: int, year: int, db: Sess
 
     page = 1
     while True:
+        # Petición a Eventos: Solo del mes seleccionado y sin filtrar target_type
         resp = gitlab_api_request("get", f"projects/{project_id}/events", params={
-            "target_type": "WikiPage",
             "after": start_date.strftime("%Y-%m-%d"),
             "before": (end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
-            "per_page": 100, "page": page
+            "per_page": 100,
+            "page": page
         })
-        if not resp or not resp.json(): break
 
-        for e in resp.json():
-            title = (e.get("target_title") or "").lower()
-            action = e.get("action_name")
-            author = e.get("author_username")
-            created_at_str = e.get("created_at")
+        if not resp or not resp.json():
+            break
 
-            if not author or not created_at_str or action not in ("created", "updated"):
+        events = resp.json()
+        if not events:
+            break
+
+        for e in events:
+            # 0. Defensa absoluta contra eventos corruptos
+            if not isinstance(e, dict):
                 continue
 
-            if "manual" in title or "guia" in title or "guía" in title:
+            # 1. Filtro flexible de tipo (Wiki o Push)
+            target_type = str(e.get("target_type", "")).lower()
+            action = str(e.get("action_name", "")).lower()
+
+            is_push = "pushed" in action
+            is_wiki = "wiki" in target_type or "wiki" in action
+
+            if not is_push and not is_wiki:
+                continue
+
+            # 2. Extracción de Fecha
+            created_at_str = e.get("created_at")
+            if not created_at_str:
+                continue
+            event_date = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+
+            # 3. Extracción robusta del autor
+            author_data = e.get("author") or {}
+            author = e.get("author_username") or author_data.get("username")
+            if not author:
+                continue
+
+                # --- NUEVO: MANEJO DE PUSH EVENTS (Terminal) ---
+            if is_push:
+                push_data = e.get("push_data") or {}
+                ref = push_data.get("ref", "rama_desconocida")
+                commit_count = push_data.get("commit_count", 1)
+
+                # Extraemos el mensaje del commit para aplicarle heurística
+                commit_title_raw = push_data.get("commit_title") or "Sin mensaje"
+                commit_title = commit_title_raw.lower()
+
+                # Evaluar heurística sobre el MENSAJE DEL COMMIT
+                # Evaluar heurística sobre el MENSAJE DEL COMMIT
+                is_manual = "manual" in commit_title or "guia" in commit_title or "guía" in commit_title
+                words = commit_title.split()
+                is_cu = "caso" in words or "casos" in words or "use case" in commit_title or "cu" in words or ".cu" in commit_title
+                if not is_cu:
+                    is_cu = any(f"cu{i}" in commit_title for i in range(10))
+
+                # --- NUEVA REGLA: ¿Es Creación o Actualización? ---
+                is_creation = "nuevo" in commit_title or "cread" in commit_title or "add" in commit_title or "agregar" in commit_title
+
+                # Clasificación dinámica basada en el mensaje
+                if is_manual:
+                    evt_type = AuditEventType.MANUAL_CREATED.value if is_creation else AuditEventType.MANUAL_UPDATED.value
+                    prefix = "[Push: Manual]"
+                elif is_cu:
+                    evt_type = AuditEventType.UC_CREATED.value if is_creation else AuditEventType.UC_UPDATED.value
+                    prefix = "[Push: CU]"
+                else:
+                    evt_type = AuditEventType.PUSH_EVENT.value
+                    prefix = "[Push: General]"
+
+                # Guardamos el mensaje original en la referencia para la Vista de Detalle
+                ref_id = f"{prefix} {commit_title_raw} ({commit_count} commits -> {ref})"
+
+                stmt = pg_insert(AuditEventDB).values(
+                    project_id=project_id, username=author, event_date=event_date,
+                    event_month=month, event_year=year, event_type=evt_type,
+                    reference_id=ref_id
+                ).on_conflict_do_nothing()
+                db.execute(stmt)
+                continue
+
+            # 4. Fusión Semántica y DEFENSA CONTRA NULL (CONTINÚA WIKI)
+            title = (e.get("target_title") or "").lower()
+
+            # EL FIX: Si wiki_page es null en el JSON, Python lo vuelve None.
+            # `or {}` fuerza a que vuelva a ser un diccionario vacío seguro.
+            wiki_page_data = e.get("wiki_page") or {}
+            slug = (wiki_page_data.get("slug") or "").lower()
+
+            combined_text = f"{title} {slug}".replace('_', ' ').replace('-', ' ').replace('/', ' ')
+            words = combined_text.split()
+
+            is_manual = "manual" in combined_text or "guia" in combined_text or "guía" in combined_text
+            is_cu = "caso" in words or "casos" in words or "use case" in combined_text or "cu" in words or ".cu" in combined_text
+
+            if not is_cu:
+                is_cu = any(f"cu{i}" in combined_text for i in range(10))
+
+            if is_manual:
                 evt_type = AuditEventType.MANUAL_CREATED.value if action == "created" else AuditEventType.MANUAL_UPDATED.value
-            elif "caso" in title or "cu" in title.split() or "use case" in title:
+            elif is_cu:
                 evt_type = AuditEventType.UC_CREATED.value if action == "created" else AuditEventType.UC_UPDATED.value
             else:
                 continue
 
-            event_date = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+            ref_id = slug if slug else (title if title else str(e.get("id")))
+
+            # 5. Guardado idempotente en BD
             stmt = pg_insert(AuditEventDB).values(
                 project_id=project_id, username=author, event_date=event_date,
                 event_month=month, event_year=year, event_type=evt_type,
-                reference_id=title
+                reference_id=ref_id
             ).on_conflict_do_update(
                 index_elements=['project_id', 'event_type', 'reference_id', 'username'],
                 set_={'event_date': event_date}
             )
             db.execute(stmt)
+
         page += 1
     db.commit()
 
@@ -274,7 +364,8 @@ def fetch_and_store_issue_raised(project_id: int, month: int, year: int, db: Ses
     page = 1
     while True:
         resp = gitlab_api_request("get", f"projects/{project_id}/events", params={
-            "action": "created", "target_type": "Issue",
+            "action": "created",
+            "target_type": "issue",  # FIX: Minúsculas requeridas por la API
             "after": start_date.strftime("%Y-%m-%d"),
             "before": (end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
             "per_page": 100, "page": page
@@ -282,6 +373,10 @@ def fetch_and_store_issue_raised(project_id: int, month: int, year: int, db: Ses
         if not resp or not resp.json(): break
 
         for e in resp.json():
+            # Doble validación en Python (el JSON sí devuelve la primera en Mayúscula)
+            if e.get("target_type") != "Issue":
+                continue
+
             author = e.get("author_username")
             created_at_str = e.get("created_at")
             issue_iid = str(e.get("target_iid"))
@@ -708,7 +803,9 @@ def get_audit_metrics(month: int = Query(...), year: int = Query(...), db: Sessi
         func.sum(case((AuditEventDB.event_type == AuditEventType.MANUAL_CREATED.value, 1), else_=0)).label(
             'manual_created'),
         func.sum(case((AuditEventDB.event_type == AuditEventType.MANUAL_UPDATED.value, 1), else_=0)).label(
-            'manual_updated')
+            'manual_updated'),
+        func.sum(case((AuditEventDB.event_type == AuditEventType.PUSH_EVENT.value, 1), else_=0)).label(
+            'total_pushes')
     ).filter(
         AuditEventDB.event_month == month,
         AuditEventDB.event_year == year
@@ -725,6 +822,41 @@ def get_audit_metrics(month: int = Query(...), year: int = Query(...), db: Sessi
             uc_created=r.uc_created or 0,
             uc_updated=r.uc_updated or 0,
             manual_created=r.manual_created or 0,
-            manual_updated=r.manual_updated or 0
+            manual_updated=r.manual_updated or 0,
+            total_pushes=r.total_pushes or 0
         ) for r in results
+    ]
+
+
+class WikiEventDetail(BaseModel):
+    username: str
+    project_name: str
+    event_date: str
+    event_type: str
+    reference_id: str
+
+
+@app.get("/audit/wiki_details", response_model=List[WikiEventDetail], tags=["Audit"])
+def get_wiki_details(month: int = Query(...), year: int = Query(...), db: Session = Depends(get_db)):
+    results = db.query(AuditEventDB, MonitoredProject.project_name) \
+        .join(MonitoredProject, AuditEventDB.project_id == MonitoredProject.project_id) \
+        .filter(
+        AuditEventDB.event_month == month,
+        AuditEventDB.event_year == year,
+        AuditEventDB.event_type.in_([
+            AuditEventType.UC_CREATED.value, AuditEventType.UC_UPDATED.value,
+            AuditEventType.MANUAL_CREATED.value, AuditEventType.MANUAL_UPDATED.value,
+            AuditEventType.PUSH_EVENT.value
+        ])
+    ).order_by(AuditEventDB.event_date.desc()).all()
+
+    return [
+        WikiEventDetail(
+            username=e.username,
+            project_name=p_name,
+            event_date=e.event_date.isoformat(),
+            event_type=e.event_type,
+            reference_id=e.reference_id
+        )
+        for e, p_name in results
     ]

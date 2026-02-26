@@ -128,6 +128,40 @@ export const getWikiPageContent = async (projectId, slug) => {
   }
 };
 
+export const getAuditMetrics = async (month, year) => {
+  try {
+    const response = await apiClient.get('/audit/metrics', {
+      params: { month, year }
+    });
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching audit metrics:", error);
+    throw error;
+  }
+};
+
+export const forceAuditSync = async (month, year) => {
+  try {
+    const response = await apiClient.post('/audit/sync', null, {
+      params: { month, year }
+    });
+    return response.data;
+  } catch (error) {
+    console.error("Error forcing audit sync:", error);
+    throw error;
+  }
+};
+
+export const getAuditSyncStatus = async () => {
+  try {
+    const response = await apiClient.get('/audit/sync/status');
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching audit sync status:", error);
+    return { is_syncing: false };
+  }
+};
+
 export const getWikiAudit = async (projectId, username, month, year) => {
   try {
     const response = await apiClient.get(`/wiki/projects/${projectId}/audit`, {
@@ -137,5 +171,17 @@ export const getWikiAudit = async (projectId, username, month, year) => {
   } catch (error) {
     console.error(`Error auditing wiki for ${username}:`, error);
     return { audit_count: 0, events: [] };
+  }
+};
+
+export const getWikiDetails = async (month, year) => {
+  try {
+    const response = await apiClient.get('/audit/wiki_details', {
+      params: { month, year }
+    });
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching wiki details:", error);
+    return[];
   }
 };
