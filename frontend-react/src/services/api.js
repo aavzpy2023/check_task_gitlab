@@ -127,3 +127,15 @@ export const getWikiPageContent = async (projectId, slug) => {
     throw error;
   }
 };
+
+export const getWikiAudit = async (projectId, username, month, year) => {
+  try {
+    const response = await apiClient.get(`/wiki/projects/${projectId}/audit`, {
+      params: { username, month, year }
+    });
+    return response.data;
+  } catch (error) {
+    console.error(`Error auditing wiki for ${username}:`, error);
+    return { audit_count: 0, events: [] };
+  }
+};

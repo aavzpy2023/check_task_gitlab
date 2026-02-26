@@ -6,34 +6,38 @@ import './Navbar.css';
 const Navbar = () => (
   <nav className="navbar">
     <div className="navbar-brand">
-      <NavLink to="/" className="navbar-item brand">
+      <NavLink to="/" className="nav-link brand">
         📖 Portal Unificado
       </NavLink>
     </div>
     
-    <div className="navbar-menu">
-      {/* Botón Dashboard */}
+    <div className="navbar-links">
       <NavLink 
         to="/" 
-        className={({ isActive }) => (isActive ? 'navbar-item active' : 'navbar-item')}
+        className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
       >
         Dashboard
       </NavLink>
 
-      {/* SSS: Botón NUEVO para Documentación */}
       <NavLink 
         to="/docs" 
-        className={({ isActive }) => (isActive ? 'navbar-item active' : 'navbar-item')}
+        className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
       >
         Documentación
       </NavLink>
 
-      {/* Botón Proyectos */}
       <NavLink 
         to="/projects" 
-        className={({ isActive }) => (isActive ? 'navbar-item active' : 'navbar-item')}
+        className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
       >
         Proyectos
+      </NavLink>
+
+      <NavLink 
+        to="/audit/" 
+        className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+      >
+        Auditoría
       </NavLink>
     </div>
   </nav>

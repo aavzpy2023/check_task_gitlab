@@ -27,6 +27,9 @@ from sqlalchemy import (
     String,
     create_engine,
     func,
+    Integer,
+    Boolean,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -42,6 +45,7 @@ DATABASE_URL = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_
 SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", 3600))
 PROJECTS_CSV_PATH = "./projects.csv"
 SYNC_IN_PROGRESS = False
+AUDIT_SYNC_IN_PROGRESS = False
 
 # --- SQLAlchemy Setup ---
 engine = create_engine(DATABASE_URL)
@@ -59,6 +63,14 @@ LABEL_MAPPING = {
     TaskStatus.QA_REVIEW: ['PARA REVISION', 'PARA REVISIÓN', 'Para Revisión'],
     TaskStatus.FUNCTIONAL_REVIEW: ['REVISION FUNCIONAL', 'REVISIÓN FUNCIONAL', 'Revisión Funcional'],
 }
+
+class AuditEventType(str, enum.Enum):
+    ISSUE_RAISED = "ISSUE_RAISED"
+    ISSUE_REVIEWED = "ISSUE_REVIEWED"
+    UC_CREATED = "UC_CREATED"
+    UC_UPDATED = "UC_UPDATED"
+    MANUAL_CREATED = "MANUAL_CREATED"
+    MANUAL_UPDATED = "MANUAL_UPDATED"
 
 class SystemMetadata(Base):
     __tablename__ = "system_metadata"
@@ -78,6 +90,23 @@ class GitLabTaskDB(Base):
     updated_at = Column(DateTime(timezone=True))
     raw_data = Column(JSONB)
     cycle_metrics = Column(JSONB, default={}) 
+
+
+class AuditEventDB(Base):
+    __tablename__ = "audit_events"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    project_id = Column(BigInteger, ForeignKey("monitored_projects.project_id"), nullable=False, index=True)
+    username = Column(String(255), nullable=False, index=True)
+    event_date = Column(DateTime(timezone=True), nullable=False)
+    event_month = Column(Integer, nullable=False)
+    event_year = Column(Integer, nullable=False)
+    event_type = Column(String(50), nullable=False)
+    is_on_time = Column(Boolean, nullable=True)
+    reference_id = Column(String(255), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('project_id', 'event_type', 'reference_id', 'username', name='uix_audit_event_idemp'),
+    )
 
 class CycleMetrics(BaseModel):
     execution_days: int = 0
@@ -109,6 +138,18 @@ class ProjectSummary(BaseModel):
     id: int
     name: str
     review_task_count: int
+
+
+class TesterAuditMetrics(BaseModel):
+    username: str
+    issues_raised: int = 0
+    issues_reviewed: int = 0
+    issues_reviewed_on_time: int = 0
+    uc_created: int = 0
+    uc_updated: int = 0
+    manual_created: int = 0
+    manual_updated: int = 0
+
 
 # --- Lógica de Sincronización ---
 def gitlab_api_request(method: str, endpoint: str, **kwargs) -> Optional[requests.Response]:
@@ -431,3 +472,72 @@ def get_wiki_page_content(project_id: int, slug: str):
     safe_slug = urllib.parse.quote(slug, safe='')
     response = http_gitlab_api_request("get", f"projects/{project_id}/wikis/{safe_slug}")
     return response.json()
+
+@app.get("/wiki/projects/{project_id}/audit", tags=["Wiki"])
+def audit_wiki_changes(
+    project_id: int, 
+    username: str = Query(..., description="Username de GitLab a auditar"),
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2000)
+):
+    """
+    Busca eventos de edición de Wiki realizados por un usuario en un mes específico.
+    """
+    import datetime
+    
+    # 1. Definir el rango temporal
+    start_date = datetime.date(year, month, 1)
+    if month == 12:
+        end_date = datetime.date(year + 1, 1, 1)
+    else:
+        end_date = datetime.date(year, month + 1, 1)
+
+    # 2. Consultar el endpoint de Eventos de GitLab
+    # target_type=wiki es el filtro clave aquí
+    params = {
+        "after": start_date.isoformat(),
+        "before": end_date.isoformat(),
+        "sort": "desc"
+    }
+    
+    response = http_gitlab_api_request(
+        "get", 
+        f"projects/{project_id}/events", 
+        params=params
+    )
+    events = response.json()
+
+    # 3. Filtrar por usuario y tipo de objetivo (WikiPage)
+    # Nota: Filtramos en Python porque la API de eventos a veces es limitada en queries
+    user_wiki_events = [
+        {
+            "page_title": e.get("target_title"),
+            "action": e.get("action_name"),
+            "created_at": e.get("created_at"),
+            "author": e.get("author_username")
+        }
+        for e in events 
+        if e.get("author_username") == username 
+        and e.get("target_type") == "WikiPage"
+    ]
+
+    return {
+        "project_id": project_id,
+        "audit_count": len(user_wiki_events),
+        "events": user_wiki_events
+    }
+
+@app.post("/audit/sync", status_code=202, tags=["Audit"])
+def start_audit_sync(month: int = Query(...), year: int = Query(...), background_tasks: BackgroundTasks = None):
+    global AUDIT_SYNC_IN_PROGRESS
+    if AUDIT_SYNC_IN_PROGRESS:
+        raise HTTPException(status_code=409, detail="Audit sync already in progress.")
+    return {"message": "Audit synchronization started in background."}
+
+@app.get("/audit/sync/status", response_model=Dict[str, bool], tags=["Audit"])
+def get_audit_sync_status():
+    return {"is_syncing": AUDIT_SYNC_IN_PROGRESS}
+
+@app.get("/audit/metrics", response_model=List[TesterAuditMetrics], tags=["Audit"])
+def get_audit_metrics(month: int = Query(...), year: int = Query(...), db: Session = Depends(get_db)):
+    return[]
