@@ -20,7 +20,7 @@ import pandas as pd
 import pypandoc
 import requests
 import urllib3
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Header
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
@@ -52,6 +52,8 @@ SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", 3600))
 PROJECTS_CSV_PATH = "./projects.csv"
 SYNC_IN_PROGRESS = False
 AUDIT_SYNC_IN_PROGRESS = False
+_raw_pass = os.getenv("CONFIG_TAB_PASS", "")
+CONFIG_TAB_PASS = _raw_pass.strip() if _raw_pass else None
 
 # --- SQLAlchemy Setup ---
 engine = create_engine(DATABASE_URL)
@@ -88,6 +90,7 @@ class MonitoredProject(Base):
     __tablename__ = "monitored_projects"
     project_id = Column(BigInteger, primary_key=True, index=True)
     project_name = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True, server_default=text('true'), nullable=False)
 
 class GitLabTaskDB(Base):
     __tablename__ = "gitlab_tasks"
@@ -146,6 +149,14 @@ class ProjectSummary(BaseModel):
     name: str
     review_task_count: int
 
+
+class AuthRequest(BaseModel):
+    password: str
+
+class ConfigProject(BaseModel):
+    id: int
+    name: str
+    is_active: bool
 
 class TesterAuditMetrics(BaseModel):
     username: str
@@ -549,7 +560,7 @@ def run_full_sync(db: Session):
     try:
         SYNC_IN_PROGRESS = True
         with db.begin():
-            projects = db.query(MonitoredProject).all()
+            projects = db.query(MonitoredProject).filter(MonitoredProject.is_active == True).all()
             if projects:
                 for project in projects:
                     sync_single_project(project.project_id, db)
@@ -599,6 +610,9 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         Base.metadata.create_all(bind=engine)
+        db.execute(text("ALTER TABLE monitored_projects ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;"))
+        db.commit()
+
         if os.path.exists(PROJECTS_CSV_PATH):
             df = pd.read_csv(PROJECTS_CSV_PATH)
             for _, row in df.iterrows():
@@ -644,7 +658,7 @@ def get_last_sync_time(db: Session = Depends(get_db)):
 
 @app.get("/projects/active_from_db", response_model=List[ProjectSummary], tags=["Task Dashboard (DB)"])
 def get_active_projects_from_db(label: TaskStatus = Query(...), db: Session = Depends(get_db)):
-    results = db.query(MonitoredProject.project_id, MonitoredProject.project_name, func.count(GitLabTaskDB.task_id).label("task_count")).join(GitLabTaskDB, MonitoredProject.project_id == GitLabTaskDB.project_id).filter(GitLabTaskDB.task_status_label == label.value).group_by(MonitoredProject.project_id, MonitoredProject.project_name).order_by(func.count(GitLabTaskDB.task_id).desc()).all()
+    results = db.query(MonitoredProject.project_id, MonitoredProject.project_name, func.count(GitLabTaskDB.task_id).label("task_count")).join(GitLabTaskDB, MonitoredProject.project_id == GitLabTaskDB.project_id).filter(GitLabTaskDB.task_status_label == label.value, MonitoredProject.is_active == True).group_by(MonitoredProject.project_id, MonitoredProject.project_name).order_by(func.count(GitLabTaskDB.task_id).desc()).all()
     return [ProjectSummary(id=pid, name=pname, review_task_count=count) for pid, pname, count in results]
 
 @app.get("/tasks/all_by_label", response_model=List[TaskWithProject], tags=["Task Dashboard (DB)"])
@@ -652,7 +666,7 @@ def get_all_tasks_by_label(label: TaskStatus = Query(...), db: Session = Depends
     # 1. Consulta optimizada y formateada para legibilidad
     db_tasks = db.query(GitLabTaskDB, MonitoredProject.project_name)\
         .join(MonitoredProject, GitLabTaskDB.project_id == MonitoredProject.project_id)\
-        .filter(GitLabTaskDB.task_status_label == label.value)\
+        .filter(GitLabTaskDB.task_status_label == label.value, MonitoredProject.is_active == True)\
         .order_by(MonitoredProject.project_name, GitLabTaskDB.updated_at.desc())\
         .all()
     
@@ -707,7 +721,7 @@ def get_projects_with_wiki(db: Session = Depends(get_db)):
     """
     Retorna la lista de proyectos monitoreados para seleccionar cuál wiki ver.
     """
-    projects = db.query(MonitoredProject).all()
+    projects = db.query(MonitoredProject).filter(MonitoredProject.is_active == True).all()
     # Mapeamos al modelo ProjectSummary con review_task_count en 0 ya que no es relevante aquí
     return [ProjectSummary(id=p.project_id, name=p.project_name, review_task_count=0) for p in projects]
 
@@ -791,7 +805,7 @@ def run_audit_sync_wrapper(month: int, year: int):
         AUDIT_SYNC_IN_PROGRESS = True
         db = SessionLocal()
         try:
-            projects = db.query(MonitoredProject).all()
+            projects = db.query(MonitoredProject).filter(MonitoredProject.is_active == True).all()
             for project in projects:
                 try:
                     fetch_and_store_wiki_events(project.project_id, month, year, db)
@@ -842,7 +856,10 @@ def get_audit_metrics(month: int = Query(...), year: int = Query(...), db: Sessi
             'manual_updated'),
         func.sum(case((AuditEventDB.event_type == AuditEventType.PUSH_EVENT.value, 1), else_=0)).label(
             'total_pushes')
+    ).join(
+        MonitoredProject, AuditEventDB.project_id == MonitoredProject.project_id
     ).filter(
+        MonitoredProject.is_active == True,
         AuditEventDB.event_month == month,
         AuditEventDB.event_year == year
     ).group_by(
@@ -877,6 +894,7 @@ def get_wiki_details(month: int = Query(...), year: int = Query(...), db: Sessio
     results = db.query(AuditEventDB, MonitoredProject.project_name) \
         .join(MonitoredProject, AuditEventDB.project_id == MonitoredProject.project_id) \
         .filter(
+        MonitoredProject.is_active == True,
         AuditEventDB.event_month == month,
         AuditEventDB.event_year == year,
         AuditEventDB.event_type.in_([
@@ -897,3 +915,40 @@ def get_wiki_details(month: int = Query(...), year: int = Query(...), db: Sessio
         )
         for e, p_name in results
     ]
+
+
+def verify_config_pass(x_config_pass: str = Header(...)):
+    if not CONFIG_TAB_PASS:
+        raise HTTPException(status_code=500,
+                            detail="ERROR DE SERVIDOR: La variable CONFIG_TAB_PASS no está inyectada en el contenedor.")
+    if x_config_pass != CONFIG_TAB_PASS:
+        raise HTTPException(status_code=401, detail="Acceso denegado: Credenciales inválidas.")
+
+
+
+@app.post("/config/auth", tags=["Configuration"])
+def authenticate_config(request: AuthRequest):
+    if not CONFIG_TAB_PASS:
+        raise HTTPException(status_code=500,
+                            detail="ERROR DE SERVIDOR: La variable CONFIG_TAB_PASS no está inyectada en el contenedor. Revisa tu docker-compose y el archivo .env raíz.")
+    if request.password != CONFIG_TAB_PASS:
+        raise HTTPException(status_code=401, detail="Contraseña incorrecta.")
+    return {"status": "ok"}
+
+
+@app.get("/config/projects", response_model=List[ConfigProject], dependencies=[Depends(verify_config_pass)],
+         tags=["Configuration"])
+def get_config_projects(db: Session = Depends(get_db)):
+    projects = db.query(MonitoredProject).order_by(MonitoredProject.project_name).all()
+    return [ConfigProject(id=p.project_id, name=p.project_name, is_active=p.is_active) for p in projects]
+
+
+@app.patch("/config/projects/{project_id}/toggle", dependencies=[Depends(verify_config_pass)], tags=["Configuration"])
+def toggle_project_state(project_id: int, db: Session = Depends(get_db)):
+    project = db.query(MonitoredProject).filter(MonitoredProject.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    project.is_active = not project.is_active
+    db.commit()
+    return {"id": project.project_id, "is_active": project.is_active}

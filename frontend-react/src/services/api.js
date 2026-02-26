@@ -185,3 +185,34 @@ export const getWikiDetails = async (month, year) => {
     return[];
   }
 };
+
+export const verifyConfigAccess = async (password) => {
+  try {
+    const response = await apiClient.post('/config/auth', { password });
+    return response.data;
+  } catch (error) {
+    throw new Error(error.response?.data?.detail || "Error de conexión");
+  }
+};
+
+export const getConfigProjects = async (password) => {
+  try {
+    const response = await apiClient.get('/config/projects', {
+      headers: { 'X-Config-Pass': password }
+    });
+    return response.data;
+  } catch (error) {
+    throw new Error("No autorizado o sesión expirada");
+  }
+};
+
+export const toggleProjectState = async (projectId, password) => {
+  try {
+    const response = await apiClient.patch(`/config/projects/${projectId}/toggle`, {}, {
+      headers: { 'X-Config-Pass': password }
+    });
+    return response.data;
+  } catch (error) {
+    throw new Error("Fallo al cambiar el estado del proyecto");
+  }
+};
