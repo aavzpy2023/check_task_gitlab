@@ -32,6 +32,7 @@ from sqlalchemy import (
     Integer,
     Boolean,
     UniqueConstraint,
+    case,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -651,17 +652,79 @@ def audit_wiki_changes(
         "events": user_wiki_events
     }
 
+
+def run_audit_sync_wrapper(month: int, year: int):
+    global AUDIT_SYNC_IN_PROGRESS
+    if AUDIT_SYNC_IN_PROGRESS: return
+    try:
+        AUDIT_SYNC_IN_PROGRESS = True
+        db = SessionLocal()
+        try:
+            projects = db.query(MonitoredProject).all()
+            for project in projects:
+                try:
+                    fetch_and_store_wiki_events(project.project_id, month, year, db)
+                    fetch_and_store_issue_raised(project.project_id, month, year, db)
+                    fetch_and_store_issue_reviews(project.project_id, month, year, db)
+                except Exception as e:
+                    print(f"---[AUDIT] Error syncing project {project.project_id}: {e}")
+                    db.rollback()  # Contains error to the single project
+        finally:
+            db.close()
+    finally:
+        AUDIT_SYNC_IN_PROGRESS = False
+
+
 @app.post("/audit/sync", status_code=202, tags=["Audit"])
 def start_audit_sync(month: int = Query(...), year: int = Query(...), background_tasks: BackgroundTasks = None):
     global AUDIT_SYNC_IN_PROGRESS
     if AUDIT_SYNC_IN_PROGRESS:
         raise HTTPException(status_code=409, detail="Audit sync already in progress.")
+
+    if background_tasks:
+        background_tasks.add_task(run_audit_sync_wrapper, month, year)
+
     return {"message": "Audit synchronization started in background."}
+
 
 @app.get("/audit/sync/status", response_model=Dict[str, bool], tags=["Audit"])
 def get_audit_sync_status():
     return {"is_syncing": AUDIT_SYNC_IN_PROGRESS}
 
+
 @app.get("/audit/metrics", response_model=List[TesterAuditMetrics], tags=["Audit"])
 def get_audit_metrics(month: int = Query(...), year: int = Query(...), db: Session = Depends(get_db)):
-    return[]
+    results = db.query(
+        AuditEventDB.username,
+        func.sum(case((AuditEventDB.event_type == AuditEventType.ISSUE_RAISED.value, 1), else_=0)).label(
+            'issues_raised'),
+        func.sum(case((AuditEventDB.event_type == AuditEventType.ISSUE_REVIEWED.value, 1), else_=0)).label(
+            'issues_reviewed'),
+        func.sum(case(
+            ((AuditEventDB.event_type == AuditEventType.ISSUE_REVIEWED.value) & (AuditEventDB.is_on_time == True), 1),
+            else_=0)).label('issues_reviewed_on_time'),
+        func.sum(case((AuditEventDB.event_type == AuditEventType.UC_CREATED.value, 1), else_=0)).label('uc_created'),
+        func.sum(case((AuditEventDB.event_type == AuditEventType.UC_UPDATED.value, 1), else_=0)).label('uc_updated'),
+        func.sum(case((AuditEventDB.event_type == AuditEventType.MANUAL_CREATED.value, 1), else_=0)).label(
+            'manual_created'),
+        func.sum(case((AuditEventDB.event_type == AuditEventType.MANUAL_UPDATED.value, 1), else_=0)).label(
+            'manual_updated')
+    ).filter(
+        AuditEventDB.event_month == month,
+        AuditEventDB.event_year == year
+    ).group_by(
+        AuditEventDB.username
+    ).all()
+
+    return [
+        TesterAuditMetrics(
+            username=r.username,
+            issues_raised=r.issues_raised or 0,
+            issues_reviewed=r.issues_reviewed or 0,
+            issues_reviewed_on_time=r.issues_reviewed_on_time or 0,
+            uc_created=r.uc_created or 0,
+            uc_updated=r.uc_updated or 0,
+            manual_created=r.manual_created or 0,
+            manual_updated=r.manual_updated or 0
+        ) for r in results
+    ]
