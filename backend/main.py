@@ -5,7 +5,9 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import calendar
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
 from threading import Thread
 from typing import Dict, List, Optional
 from collections import defaultdict
@@ -216,6 +218,128 @@ def calculate_cycle_metrics_logic(issue_data, project_id, issue_iid):
         metrics["functional_days"] = (now - t_start_functional).days
 
     return metrics
+
+
+def fetch_and_store_wiki_events(project_id: int, month: int, year: int, db: Session):
+    _, last_day = calendar.monthrange(year, month)
+    start_date = datetime(year, month, 1, tzinfo=timezone.utc)
+    end_date = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+
+    page = 1
+    while True:
+        resp = gitlab_api_request("get", f"projects/{project_id}/events", params={
+            "target_type": "WikiPage",
+            "after": start_date.strftime("%Y-%m-%d"),
+            "before": (end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+            "per_page": 100, "page": page
+        })
+        if not resp or not resp.json(): break
+
+        for e in resp.json():
+            title = (e.get("target_title") or "").lower()
+            action = e.get("action_name")
+            author = e.get("author_username")
+            created_at_str = e.get("created_at")
+
+            if not author or not created_at_str or action not in ("created", "updated"):
+                continue
+
+            if "manual" in title or "guia" in title or "guía" in title:
+                evt_type = AuditEventType.MANUAL_CREATED.value if action == "created" else AuditEventType.MANUAL_UPDATED.value
+            elif "caso" in title or "cu" in title.split() or "use case" in title:
+                evt_type = AuditEventType.UC_CREATED.value if action == "created" else AuditEventType.UC_UPDATED.value
+            else:
+                continue
+
+            event_date = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+            stmt = pg_insert(AuditEventDB).values(
+                project_id=project_id, username=author, event_date=event_date,
+                event_month=month, event_year=year, event_type=evt_type,
+                reference_id=title
+            ).on_conflict_do_update(
+                index_elements=['project_id', 'event_type', 'reference_id', 'username'],
+                set_={'event_date': event_date}
+            )
+            db.execute(stmt)
+        page += 1
+    db.commit()
+
+
+def fetch_and_store_issue_raised(project_id: int, month: int, year: int, db: Session):
+    _, last_day = calendar.monthrange(year, month)
+    start_date = datetime(year, month, 1, tzinfo=timezone.utc)
+    end_date = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+
+    page = 1
+    while True:
+        resp = gitlab_api_request("get", f"projects/{project_id}/events", params={
+            "action": "created", "target_type": "Issue",
+            "after": start_date.strftime("%Y-%m-%d"),
+            "before": (end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+            "per_page": 100, "page": page
+        })
+        if not resp or not resp.json(): break
+
+        for e in resp.json():
+            author = e.get("author_username")
+            created_at_str = e.get("created_at")
+            issue_iid = str(e.get("target_iid"))
+            if not author or not created_at_str or not issue_iid: continue
+
+            event_date = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+            stmt = pg_insert(AuditEventDB).values(
+                project_id=project_id, username=author, event_date=event_date,
+                event_month=month, event_year=year,
+                event_type=AuditEventType.ISSUE_RAISED.value,
+                reference_id=issue_iid
+            ).on_conflict_do_nothing()
+            db.execute(stmt)
+        page += 1
+    db.commit()
+
+
+def fetch_and_store_issue_reviews(project_id: int, month: int, year: int, db: Session):
+    _, last_day = calendar.monthrange(year, month)
+    start_date = datetime(year, month, 1, tzinfo=timezone.utc)
+    end_date = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+    func_labels = set(LABEL_MAPPING[TaskStatus.FUNCTIONAL_REVIEW])
+
+    page = 1
+    while True:
+        resp = gitlab_api_request("get", f"projects/{project_id}/issues", params={
+            "updated_after": start_date.isoformat(),
+            "updated_before": end_date.isoformat(),
+            "per_page": 100, "page": page
+        })
+        if not resp or not resp.json(): break
+
+        for issue in resp.json():
+            issue_iid = str(issue["iid"])
+            issue_created_at = datetime.fromisoformat(issue["created_at"].replace('Z', '+00:00'))
+
+            ev_resp = gitlab_api_request("get", f"projects/{project_id}/issues/{issue_iid}/resource_label_events")
+            if not ev_resp: continue
+
+            for e in ev_resp.json():
+                if e.get("action") == "add" and e.get("label") and e["label"]["name"] in func_labels:
+                    event_date = datetime.fromisoformat(e["created_at"].replace('Z', '+00:00'))
+                    if event_date.month == month and event_date.year == year:
+                        author = e["user"]["username"]
+                        is_on_time = (event_date - issue_created_at).days <= 3
+
+                        stmt = pg_insert(AuditEventDB).values(
+                            project_id=project_id, username=author, event_date=event_date,
+                            event_month=month, event_year=year,
+                            event_type=AuditEventType.ISSUE_REVIEWED.value,
+                            is_on_time=is_on_time, reference_id=issue_iid
+                        ).on_conflict_do_update(
+                            index_elements=['project_id', 'event_type', 'reference_id', 'username'],
+                            set_={'is_on_time': is_on_time, 'event_date': event_date}
+                        )
+                        db.execute(stmt)
+        page += 1
+    db.commit()
+
 
 def sync_single_project(project_id: int, db: Session):
     tasks_found = defaultdict(list)
