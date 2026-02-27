@@ -40,6 +40,12 @@ const TaskItem = ({ task }) => {
   // Calculamos el estado de estancamiento
   const isStale = isTaskStale(task.updated_at);
 
+  // Fallback para legacy JSONB de metrics
+  const cycleMetrics = task.cycle_metrics || {};
+  const qaBounces = cycleMetrics.qa_bounces || 0;
+  const functionalBounces = cycleMetrics.functional_bounces || 0;
+  const totalBounces = qaBounces + functionalBounces;
+
   return (
     <div className={`task-item-container ${isStale ? 'stale-task' : ''}`}>
       
@@ -60,12 +66,18 @@ const TaskItem = ({ task }) => {
             rel="noopener noreferrer" 
             className="task-link"
             title="Abrir en GitLab"
-          >
-            [LINK]
+          >[LINK]
           </a>
-          
-          <h5 className="task-title" onClick={() => setIsExpanded(!isExpanded)}>
+
+           <h5 className="task-title" onClick={() => setIsExpanded(!isExpanded)}>
             <strong>[{task.project_name}]</strong> {task.title}
+
+            {/* SKDEV BYPASS: Cambiamos totalBounces > 0 a >= 0 temporalmente para forzar su visualización */}
+            {totalBounces >= 0 && (
+              <span className="rework-badge" title={`QA: ${qaBounces} | Funcional: ${functionalBounces}`}>
+                🔄 Retrabajos: {totalBounces}
+              </span>
+            )}
           </h5>
 
           {/* Badge de Alerta si está estancada */}

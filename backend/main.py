@@ -5,12 +5,13 @@ import os
 import re
 import sys
 import tempfile
+from datetime import timedelta
 import time
 import urllib.parse
 import calendar
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
-from threading import Thread
+from threading import Thread, Lock
 from typing import Dict, List, Optional
 from collections import defaultdict
 from sqlalchemy.dialects.postgresql import JSONB
@@ -52,6 +53,7 @@ SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", 3600))
 PROJECTS_CSV_PATH = "./projects.csv"
 SYNC_IN_PROGRESS = False
 AUDIT_SYNC_IN_PROGRESS = False
+MASTER_SYNC_LOCK = Lock()
 _raw_pass = os.getenv("CONFIG_TAB_PASS", "")
 CONFIG_TAB_PASS = _raw_pass.strip() if _raw_pass else None
 
@@ -72,9 +74,16 @@ LABEL_MAPPING = {
     TaskStatus.FUNCTIONAL_REVIEW: ['REVISION FUNCIONAL', 'REVISIÓN FUNCIONAL', 'Revisión Funcional'],
 }
 
+STATUS_WEIGHTS = {
+    TaskStatus.IN_PROGRESS: 10,
+    TaskStatus.QA_REVIEW: 20,
+    TaskStatus.FUNCTIONAL_REVIEW: 30,
+}
+
 class AuditEventType(str, enum.Enum):
     ISSUE_RAISED = "ISSUE_RAISED"
     ISSUE_REVIEWED = "ISSUE_REVIEWED"
+    ISSUE_BOUNCED = "ISSUE_BOUNCED"
     UC_CREATED = "UC_CREATED"
     UC_UPDATED = "UC_UPDATED"
     MANUAL_CREATED = "MANUAL_CREATED"
@@ -122,6 +131,9 @@ class CycleMetrics(BaseModel):
     execution_days: int = 0
     review_days: int = 0
     functional_days: int = 0
+    qa_bounces: int = 0
+    functional_bounces: int = 0
+    max_weight_reached: int = 0
 
 class TimeStats(BaseModel):
     human_time_estimate: Optional[str] = None
@@ -163,6 +175,7 @@ class TesterAuditMetrics(BaseModel):
     issues_raised: int = 0
     issues_reviewed: int = 0
     issues_reviewed_on_time: int = 0
+    issues_bounced: int = 0
     uc_created: int = 0
     uc_updated: int = 0
     manual_created: int = 0
@@ -181,56 +194,98 @@ def gitlab_api_request(method: str, endpoint: str, **kwargs) -> Optional[request
     except requests.exceptions.RequestException:
         return None
 
+
 def calculate_cycle_metrics_logic(issue_data, project_id, issue_iid):
     """
-    Consulta el historial de eventos para calcular días en cada etapa.
+    Consulta el historial de eventos para calcular días en cada etapa y métricas de retrabajo.
     """
-    # 1. Obtener eventos de etiquetas (Requiere llamada extra a API)
-    # Nota: Usamos el endpoint de resource_label_events
-    events_resp = gitlab_api_request("get", f"projects/{project_id}/issues/{issue_iid}/resource_label_events")
-    events = events_resp.json() if events_resp else []
+    events = []
+    page = 1
+    while True:
+        resp = gitlab_api_request("get", f"projects/{project_id}/issues/{issue_iid}/resource_label_events",
+                                  params={"per_page": 100, "page": page})
+        if not resp or not resp.json():
+            break
+        page_events = resp.json()
+        events.extend(page_events)
+        if len(page_events) < 100:
+            break
+        page += 1
 
-    # 2. Definir hitos temporales
     created_at = datetime.fromisoformat(issue_data['created_at'].replace('Z', '+00:00'))
     now = datetime.now(timezone.utc)
-    
+
     t_start_review = None
     t_start_functional = None
 
-    # 3. Buscar cuándo ocurrieron los cambios de estado (tomamos el PRIMER evento)
-    # Buscamos variaciones de etiquetas definidas en LABEL_MAPPING
-    review_labels = set(l for sublist in LABEL_MAPPING[TaskStatus.QA_REVIEW] for l in sublist)
-    func_labels = set(l for sublist in LABEL_MAPPING[TaskStatus.FUNCTIONAL_REVIEW] for l in sublist)
-
-    # Ordenar eventos cronológicamente
     events.sort(key=lambda x: x['created_at'])
 
-    for e in events:
-        if e['action'] == 'add' and e.get('label'):
+    cleaned_events = []
+    skip_indices = set()
+    for i in range(len(events)):
+        if i in skip_indices:
+            continue
+        e1 = events[i]
+
+        if e1.get('action') == 'add' and e1.get('label'):
+            label_name = e1['label']['name']
+            t1 = datetime.fromisoformat(e1['created_at'].replace('Z', '+00:00'))
+
+            found_remove = False
+            for j in range(i + 1, len(events)):
+                e2 = events[j]
+                if e2.get('label') and e2['label']['name'] == label_name:
+                    t2 = datetime.fromisoformat(e2['created_at'].replace('Z', '+00:00'))
+                    if e2.get('action') == 'remove' and (t2 - t1).total_seconds() <= 120:
+                        skip_indices.add(j)
+                        found_remove = True
+                    break
+
+            if found_remove:
+                continue
+
+        cleaned_events.append(e1)
+
+    metrics = {
+        "execution_days": 0, "review_days": 0, "functional_days": 0,
+        "qa_bounces": 0, "functional_bounces": 0, "max_weight_reached": 0
+    }
+
+    label_to_status = {}
+    for status, labels in LABEL_MAPPING.items():
+        for l in labels:
+            label_to_status[l] = status
+
+    for e in cleaned_events:
+        if e.get('action') == 'add' and e.get('label'):
             label_name = e['label']['name']
-            event_time = datetime.fromisoformat(e['created_at'].replace('Z', '+00:00'))
-            
-            if label_name in review_labels and t_start_review is None:
-                t_start_review = event_time
-            
-            if label_name in func_labels and t_start_functional is None:
-                t_start_functional = event_time
+            if label_name in label_to_status:
+                status = label_to_status[label_name]
+                weight = STATUS_WEIGHTS.get(status, 0)
+                event_time = datetime.fromisoformat(e['created_at'].replace('Z', '+00:00'))
 
-    # 4. Calcular deltas en DÍAS
-    metrics = {"execution_days": 0, "review_days": 0, "functional_days": 0}
+                if weight < metrics["max_weight_reached"]:
+                    if status == TaskStatus.IN_PROGRESS:
+                        metrics["qa_bounces"] += 1
+                    elif status == TaskStatus.QA_REVIEW:
+                        metrics["functional_bounces"] += 1
 
-    # Calculo Ejecución (Creación -> Revisión)
+                if weight > metrics["max_weight_reached"]:
+                    metrics["max_weight_reached"] = weight
+
+                if status == TaskStatus.QA_REVIEW and t_start_review is None:
+                    t_start_review = event_time
+                if status == TaskStatus.FUNCTIONAL_REVIEW and t_start_functional is None:
+                    t_start_functional = event_time
+
     end_execution = t_start_review if t_start_review else now
     metrics["execution_days"] = (end_execution - created_at).days
 
-    # Calculo Revisión (Revisión -> Funcional)
     if t_start_review:
         end_review = t_start_functional if t_start_functional else now
-        # Si t_start_functional es anterior a t_start_review (error de flujo), asumimos 0
         if end_review > t_start_review:
             metrics["review_days"] = (end_review - t_start_review).days
 
-    # Calculo Funcional (Funcional -> Ahora)
     if t_start_functional:
         metrics["functional_days"] = (now - t_start_functional).days
 
@@ -447,11 +502,18 @@ def fetch_and_store_issue_reviews(project_id: int, month: int, year: int, db: Se
     end_date = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
     func_labels = set(LABEL_MAPPING[TaskStatus.FUNCTIONAL_REVIEW])
 
+    # Ampliamos el mapeo para atrapar explícitamente los "CP Fallido" y sus variaciones
+    in_progress_labels = set(LABEL_MAPPING[TaskStatus.IN_PROGRESS])
+    bounce_labels = in_progress_labels.union({"CP Fallido", "CP FALLIDO", "cp fallido"})
+    bounce_labels_lower = {l.lower() for l in bounce_labels}
+
     page = 1
     while True:
+        # Añadido "state": "all" para garantizar que lea el historial de las tareas CERRADAS
+        # [TASK-1.1.1] Eliminado 'updated_before' para no perder historial de tareas cerradas en meses posteriores
         resp = gitlab_api_request("get", f"projects/{project_id}/issues", params={
             "updated_after": start_date.isoformat(),
-            "updated_before": end_date.isoformat(),
+            "state": "all",
             "per_page": 100, "page": page
         })
         if not resp or not resp.json(): break
@@ -464,22 +526,40 @@ def fetch_and_store_issue_reviews(project_id: int, month: int, year: int, db: Se
             if not ev_resp: continue
 
             for e in ev_resp.json():
-                if e.get("action") == "add" and e.get("label") and e["label"]["name"] in func_labels:
+                if e.get("action") == "add" and e.get("label"):
+                    label_name = e["label"]["name"]
+                    label_name_lower = label_name.lower()
                     event_date = datetime.fromisoformat(e["created_at"].replace('Z', '+00:00'))
+                    # [TASK-1.1.3] Backup a timestamp para asegurar unicidad si no hay ID
+                    event_id = str(e.get("id", event_date.timestamp()))
+
                     if event_date.month == month and event_date.year == year:
                         author = e["user"]["username"]
-                        is_on_time = (event_date - issue_created_at).days <= 3
 
-                        stmt = pg_insert(AuditEventDB).values(
-                            project_id=project_id, username=author, event_date=event_date,
-                            event_month=month, event_year=year,
-                            event_type=AuditEventType.ISSUE_REVIEWED.value,
-                            is_on_time=is_on_time, reference_id=issue_iid
-                        ).on_conflict_do_update(
-                            index_elements=['project_id', 'event_type', 'reference_id', 'username'],
-                            set_={'is_on_time': is_on_time, 'event_date': event_date}
-                        )
-                        db.execute(stmt)
+                        if label_name in func_labels:
+                            is_on_time = (event_date - issue_created_at).days <= 3
+                            stmt = pg_insert(AuditEventDB).values(
+                                project_id=project_id, username=author, event_date=event_date,
+                                event_month=month, event_year=year,
+                                event_type=AuditEventType.ISSUE_REVIEWED.value,
+                                is_on_time=is_on_time, reference_id=issue_iid
+                            ).on_conflict_do_update(
+                                index_elements=['project_id', 'event_type', 'reference_id', 'username'],
+                                set_={'is_on_time': is_on_time, 'event_date': event_date}
+                            )
+                            db.execute(stmt)
+
+                        # [TASK-1.1.2] Si es "CP Fallido" o "En Ejecución" evaluado de forma case-insensitive
+                        elif label_name_lower in bounce_labels_lower or "cp fallido" in label_name_lower:
+                            stmt = pg_insert(AuditEventDB).values(
+                                project_id=project_id, username=author, event_date=event_date,
+                                event_month=month, event_year=year,
+                                event_type=AuditEventType.ISSUE_BOUNCED.value,
+                                # CRÍTICO: Adjuntamos _b_event_id para que 3 viradas en la misma tarea
+                                # se guarden como 3 filas distintas y no se sobreescriban.
+                                reference_id=f"{issue_iid}_b_{event_id}"
+                            ).on_conflict_do_nothing()
+                            db.execute(stmt)
         page += 1
     db.commit()
 
@@ -534,41 +614,77 @@ def run_single_project_sync_wrapper(project_id: int):
     try:
         SYNC_IN_PROGRESS = True
         print(f"--- [SYNC] Iniciando sincronización ÚNICA para proyecto {project_id}... ---")
-        
-        # Creamos una sesión dedicada para esta tarea
-        db = SessionLocal()
-        try:
-            # Usamos una transacción explícita
-            with db.begin():
-                sync_single_project(project_id, db)
-                
-                # Actualizamos la marca de tiempo global también para reflejar actividad
-                stmt = pg_insert(SystemMetadata).values(key="singleton", last_sync_time=func.now()).on_conflict_do_update(index_elements=['key'], set_={'last_sync_time': func.now()})
-                db.execute(stmt)
-        except Exception as e:
-            print(f"--- [SYNC] 🚨 Error en sincronización de proyecto {project_id}: {e}")
-        finally:
-            db.close()
+
+        with MASTER_SYNC_LOCK:
+            # Creamos una sesión dedicada para esta tarea
+            db = SessionLocal()
+            try:
+                # Usamos una transacción explícita
+                with db.begin():
+                    sync_single_project(project_id, db)
+
+                    # Actualizamos la marca de tiempo global también para reflejar actividad
+                    stmt = pg_insert(SystemMetadata).values(key="singleton",
+                                                            last_sync_time=func.now()).on_conflict_do_update(
+                        index_elements=['key'], set_={'last_sync_time': func.now()})
+                    db.execute(stmt)
+            except Exception as e:
+                print(f"--- [SYNC] 🚨 Error en sincronización de proyecto {project_id}: {e}")
+            finally:
+                db.close()
             
         print(f"--- [SYNC] ✅ Sincronización de proyecto {project_id} finalizada.")
     finally:
         SYNC_IN_PROGRESS = False
+
+
+def sync_single_project_thread_safe(project_id: int):
+    """
+    Thread-safe wrapper to isolate the DB session for each concurrent worker.
+    """
+    db = SessionLocal()
+    try:
+        with db.begin():
+            sync_single_project(project_id, db)
+    except Exception as e:
+        print(f"--- [SYNC] 🚨 Error in thread for project {project_id}: {e}")
+    finally:
+        db.close()
+
 
 def run_full_sync(db: Session):
     global SYNC_IN_PROGRESS
     if SYNC_IN_PROGRESS: return
     try:
         SYNC_IN_PROGRESS = True
-        with db.begin():
+
+        with MASTER_SYNC_LOCK:
+            # 1. Fetch active project IDs only
             projects = db.query(MonitoredProject).filter(MonitoredProject.is_active == True).all()
-            if projects:
-                for project in projects:
-                    sync_single_project(project.project_id, db)
-            stmt = pg_insert(SystemMetadata).values(key="singleton", last_sync_time=func.now()).on_conflict_do_update(index_elements=['key'], set_={'last_sync_time': func.now()})
+            project_ids = [p.project_id for p in projects]
+
+            if project_ids:
+                print(f"--- [SYNC] Starting parallel sync for {len(project_ids)} active projects... ---")
+
+                # 2. Multithreading: Max 5 concurrent workers to prevent GitLab HTTP 429 errors
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = [executor.submit(sync_single_project_thread_safe, pid) for pid in project_ids]
+                    for future in as_completed(futures):
+                        try:
+                            future.result()  # Raise exceptions if occurred inside the thread
+                        except Exception as e:
+                            print(f"--- [SYNC] Thread critical failure: {e}")
+
+            # 3. Update global timestamp in the main thread
+            # SKDEV FIX: Evitamos 'with db.begin():' porque db.query() arriba ya inició la transacción
+            stmt = pg_insert(SystemMetadata).values(key="singleton", last_sync_time=func.now()).on_conflict_do_update(
+                index_elements=['key'], set_={'last_sync_time': func.now()})
             db.execute(stmt)
+            db.commit()
+
     except Exception as e:
-        print(f"Error en ciclo de sync: {e}")
-        # El rollback es automático con 'with db.begin()'
+        db.rollback()
+        print(f"Error in sync cycle: {e}")
     finally:
         SYNC_IN_PROGRESS = False
 
@@ -803,19 +919,20 @@ def run_audit_sync_wrapper(month: int, year: int):
     if AUDIT_SYNC_IN_PROGRESS: return
     try:
         AUDIT_SYNC_IN_PROGRESS = True
-        db = SessionLocal()
-        try:
-            projects = db.query(MonitoredProject).filter(MonitoredProject.is_active == True).all()
-            for project in projects:
-                try:
-                    fetch_and_store_wiki_events(project.project_id, month, year, db)
-                    fetch_and_store_issue_raised(project.project_id, month, year, db)
-                    fetch_and_store_issue_reviews(project.project_id, month, year, db)
-                except Exception as e:
-                    print(f"---[AUDIT] Error syncing project {project.project_id}: {e}")
-                    db.rollback()  # Contains error to the single project
-        finally:
-            db.close()
+        with MASTER_SYNC_LOCK:
+            db = SessionLocal()
+            try:
+                projects = db.query(MonitoredProject).filter(MonitoredProject.is_active == True).all()
+                for project in projects:
+                    try:
+                        fetch_and_store_wiki_events(project.project_id, month, year, db)
+                        fetch_and_store_issue_raised(project.project_id, month, year, db)
+                        fetch_and_store_issue_reviews(project.project_id, month, year, db)
+                    except Exception as e:
+                        print(f"---[AUDIT] Error syncing project {project.project_id}: {e}")
+                        db.rollback()  # Contains error to the single project
+            finally:
+                db.close()
     finally:
         AUDIT_SYNC_IN_PROGRESS = False
 
@@ -848,6 +965,8 @@ def get_audit_metrics(month: int = Query(...), year: int = Query(...), db: Sessi
         func.sum(case(
             ((AuditEventDB.event_type == AuditEventType.ISSUE_REVIEWED.value) & (AuditEventDB.is_on_time == True), 1),
             else_=0)).label('issues_reviewed_on_time'),
+        func.sum(case((AuditEventDB.event_type == AuditEventType.ISSUE_BOUNCED.value, 1), else_=0)).label(
+            'issues_bounced'),
         func.sum(case((AuditEventDB.event_type == AuditEventType.UC_CREATED.value, 1), else_=0)).label('uc_created'),
         func.sum(case((AuditEventDB.event_type == AuditEventType.UC_UPDATED.value, 1), else_=0)).label('uc_updated'),
         func.sum(case((AuditEventDB.event_type == AuditEventType.MANUAL_CREATED.value, 1), else_=0)).label(
@@ -872,6 +991,7 @@ def get_audit_metrics(month: int = Query(...), year: int = Query(...), db: Sessi
             issues_raised=r.issues_raised or 0,
             issues_reviewed=r.issues_reviewed or 0,
             issues_reviewed_on_time=r.issues_reviewed_on_time or 0,
+            issues_bounced=r.issues_bounced or 0,
             uc_created=r.uc_created or 0,
             uc_updated=r.uc_updated or 0,
             manual_created=r.manual_created or 0,
@@ -901,7 +1021,8 @@ def get_wiki_details(month: int = Query(...), year: int = Query(...), db: Sessio
             AuditEventType.UC_CREATED.value, AuditEventType.UC_UPDATED.value,
             AuditEventType.MANUAL_CREATED.value, AuditEventType.MANUAL_UPDATED.value,
             AuditEventType.PUSH_EVENT.value,
-            AuditEventType.ISSUE_RAISED.value, AuditEventType.ISSUE_REVIEWED.value
+            AuditEventType.ISSUE_RAISED.value, AuditEventType.ISSUE_REVIEWED.value,
+            AuditEventType.ISSUE_BOUNCED.value
         ])
     ).order_by(AuditEventDB.event_date.desc()).all()
 

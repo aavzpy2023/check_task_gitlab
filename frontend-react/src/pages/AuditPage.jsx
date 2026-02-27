@@ -46,7 +46,7 @@ const AuditPage = () => {
       case 'PUSH_EVENT': return { label: 'Git Push (Terminal)', bg: '#f3e8ff', color: '#6f42c1' };
       case 'ISSUE_RAISED': return { label: 'Issue (Levantada)', bg: '#ffeeba', color: '#856404' };
       case 'ISSUE_REVIEWED': return { label: 'Issue (Revisada)', bg: '#d1ecf1', color: '#0c5460' };
-      case 'ISSUE_BOTH': return { label: 'Issue (Levantada y Revisada)', bg: '#e2e3e5', color: '#383d41' };
+      case 'ISSUE_BOUNCED': return { label: 'Issue (Rechazada/Virada)', bg: '#f8d7da', color: '#721c24' };
       default: return { label: type, bg: '#f8f9fa', color: '#212529' };
     }
   };
@@ -114,13 +114,13 @@ const AuditPage = () => {
     if (!auditData || auditData.length === 0) return;
 
     const headers =[
-      'Usuario', 'Issues Levantadas', 'Issues Revisadas', 'Rev. en Tiempo'
+      'Usuario', 'Issues Levantadas', 'Issues Revisadas', 'Rev. en Tiempo', 'Issues Viradas'
     ];
     if (showWiki) headers.push('CU Creados', 'CU Actualizados', 'Man. Creados', 'Man. Actualizados');
     if (showCode) headers.push('Pushes (Terminal)');
 
     const rows = auditData.map(w => {
-      const row =[w.username, w.issues_raised, w.issues_reviewed, w.issues_reviewed_on_time];
+      const row =[w.username, w.issues_raised, w.issues_reviewed, w.issues_reviewed_on_time, w.issues_bounced];
       if (showWiki) row.push(w.uc_created, w.uc_updated, w.manual_created, w.manual_updated);
       if (showCode) row.push(w.total_pushes || 0);
       return row;
@@ -244,6 +244,7 @@ const AuditPage = () => {
               <th style={{ padding: '1rem', textAlign: 'center' }}>Issues Levantadas</th>
               <th style={{ padding: '1rem', textAlign: 'center' }}>Issues Revisadas</th>
               <th style={{ padding: '1rem', textAlign: 'center' }}>Rev. en Tiempo (≤3d)</th>
+              <th style={{ padding: '1rem', textAlign: 'center', color: '#dc3545' }}>Issues Viradas</th>
                {showWiki && (
                 <>
                   <th style={{ padding: '1rem', textAlign: 'center' }}>CU Creados</th>
@@ -270,8 +271,8 @@ const AuditPage = () => {
               const userAllDetails = wikiDetails.filter(d => d.username === worker.username);
 
               // 1. Separar Issues y Wiki/Código
-              const issueEvents = userAllDetails.filter(d => ['ISSUE_RAISED', 'ISSUE_REVIEWED'].includes(d.event_type));
-              const wikiCodeEvents = userAllDetails.filter(d => !['ISSUE_RAISED', 'ISSUE_REVIEWED'].includes(d.event_type));
+              const issueEvents = userAllDetails.filter(d =>['ISSUE_RAISED', 'ISSUE_REVIEWED', 'ISSUE_BOUNCED'].includes(d.event_type));
+              const wikiCodeEvents = userAllDetails.filter(d => !['ISSUE_RAISED', 'ISSUE_REVIEWED', 'ISSUE_BOUNCED'].includes(d.event_type));
 
               // 2. Filtrar Wiki/Código según los checkboxes
               const filteredWikiCode = wikiCodeEvents.filter(d => {
@@ -317,6 +318,9 @@ const AuditPage = () => {
                     <td style={{ padding: '1rem', textAlign: 'center', ...getBadgeStyle(worker.issues_reviewed_on_time, worker.issues_reviewed) }}>
                       {worker.issues_reviewed_on_time} / {worker.issues_reviewed}
                     </td>
+                    <td style={{ padding: '1rem', textAlign: 'center', fontWeight: 'bold', color: worker.issues_bounced > 0 ? '#dc3545' : '#6c757d' }}>
+                      {worker.issues_bounced}
+                    </td>
                     {showWiki && (
                       <>
                         <td style={{ padding: '1rem', textAlign: 'center' }}>{worker.uc_created}</td>
@@ -350,18 +354,27 @@ const AuditPage = () => {
                               {finalDetailsToShow.map((detail, idx) => {
                                 const badge = getEventBadge(detail.event_type);
                                 const isIssue = detail.event_type.startsWith('ISSUE');
+                                const cleanReferenceId = detail.reference_id.includes('_b_')
+                                    ? detail.reference_id.split('_b_')[0]
+                                    : detail.reference_id;
+
                                 return (
                                   <tr key={idx}>
                                     <td style={{ padding: '0.5rem', borderBottom: '1px solid #e9ecef' }}>{detail.project_name}</td>
                                     <td style={{ padding: '0.5rem', borderBottom: '1px solid #e9ecef', fontWeight: 'bold' }}>
-                                      {isIssue ? `Issue #${detail.reference_id}` : detail.reference_id}
+                                      {isIssue ? `Issue #${cleanReferenceId}` : cleanReferenceId}
+                                      {detail.event_type === 'ISSUE_BOUNCED' && (
+                                        <span style={{ marginLeft: '8px', fontSize: '0.75rem', color: '#dc3545', fontWeight: 'normal' }} title="Identificador único para distinguir múltiples rechazos de esta misma tarea">
+                                          (Rechazo individual)
+                                        </span>
+                                      )}
                                     </td>
                                     <td style={{ padding: '0.5rem', borderBottom: '1px solid #e9ecef', textAlign: 'center' }}>
                                       <span style={{ padding: '3px 8px', borderRadius: '4px', fontSize: '0.8rem', backgroundColor: badge.bg, color: badge.color, fontWeight: 'bold' }}>
                                         {badge.label}
                                       </span>
                                     </td>
-                                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #e9ecef', textAlign: 'center' }}>
+                                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #e9ecef', textAlign: 'center' }} title="Fecha y hora exacta de este evento">
                                       {new Date(detail.event_date).toLocaleString()}
                                     </td>
                                   </tr>

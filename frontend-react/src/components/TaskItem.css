@@ -75,7 +75,7 @@
   margin-top: 2px;          /* Ajuste óptico para alinearse con el texto del título */
 }
 
-* El Título de la tarea */
+/* El Título de la tarea */
 .task-title {
   flex-grow: 1;             /* Toma todo el espacio restante */
   margin: 0;
@@ -84,6 +84,19 @@
   line-height: 1.4;         /* Mejor lectura en múltiples líneas */
   word-wrap: break-word;    /* Romper palabras largas si es necesario */
   min-width: 0;             /* Truco CSS para evitar desbordes en flex items */
+}
+
+/* Badge de Retrabajo (Rework) en el Título */
+.rework-badge {
+    margin-left: 0.75rem;
+    background-color: #ffc107;
+    color: #212529;
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: bold;
+    display: inline-block;
+    vertical-align: text-bottom;
 }
 
 /* Ajuste del contenedor de burbujas (Para que no pegue con el borde) */
