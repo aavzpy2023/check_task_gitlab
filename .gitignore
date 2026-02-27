@@ -1,3 +1,15 @@
 *.pyc
 .env
 __pycache__/
+/.idea/check_task_gitlab.iml
+/.idea/dbnavigator.xml
+/full_project_content_export.txt
+/.idea/inspectionProfiles/Project_Default.xml
+/.idea/modules.xml
+/project_structure_tree.txt
+/backend_v10.tar
+/.idea/misc.xml
+/.idea/inspectionProfiles/profiles_settings.xml
+/frontend_v10.tar
+/.idea/.gitignore
+/.idea/vcs.xml
