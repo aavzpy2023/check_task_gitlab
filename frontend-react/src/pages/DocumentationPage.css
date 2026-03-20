@@ -1,0 +1,82 @@
+.documentation-container {
+  display: flex;
+  gap: 2rem;
+  padding: 1rem 0;
+}
+
+.doc-sidebar {
+  width: 300px;
+  flex-shrink: 0;
+  background: #fff;
+  padding: 1.5rem;
+  border-radius: 8px;
+  border: 1px solid #dee2e6;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+}
+
+.project-selector {
+  width: 100%;
+  padding: 0.5rem;
+  margin-top: 0.5rem;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  background-color: #fff;
+}
+
+.wiki-nav-list {
+  padding: 0;
+  margin: 1rem 0 0 0;
+}
+
+.doc-content {
+  flex-grow: 1;
+  background: #fff;
+  padding: 2.5rem;
+  border-radius: 8px;
+  border: 1px solid #dee2e6;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+  min-height: calc(100vh - 100px);
+  overflow-y: auto;
+}
+
+.markdown-body {
+  font-size: 1.05rem;
+  line-height: 1.6;
+  color: #24292e;
+}
+
+.markdown-body h1, .markdown-body h2, .markdown-body h3 {
+  border-bottom: 1px solid #eaecef;
+  padding-bottom: 0.3em;
+  margin-top: 1.5em;
+  margin-bottom: 16px;
+}
+
+.markdown-body code {
+  background-color: rgba(27,31,35,0.05);
+  border-radius: 3px;
+  font-size: 85%;
+  margin: 0;
+  padding: 0.2em 0.4em;
+}
+
+.markdown-body pre {
+  background-color: #f6f8fa;
+  border-radius: 3px;
+  font-size: 85%;
+  line-height: 1.45;
+  overflow: auto;
+  padding: 16px;
+}
+
+.markdown-body pre code {
+  background-color: transparent;
+  padding: 0;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  box-sizing: content-box;
+}

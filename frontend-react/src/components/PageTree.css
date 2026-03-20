@@ -1,0 +1,38 @@
+.tree-node {
+  margin-left: 0.5rem;
+}
+
+.node-label {
+  cursor: pointer;
+  padding: 0.4rem;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+  display: flex;
+  align-items: center;
+  color: #333;
+}
+
+.node-label:hover {
+  background-color: #f1f3f5;
+}
+
+.node-label.folder {
+  font-weight: bold;
+  color: #0056b3;
+}
+
+.node-label.file {
+  padding-left: 1.5rem;
+  color: #495057;
+}
+
+.node-label.file:hover {
+  background-color: #e9ecef;
+  color: #000;
+}
+
+.node-children {
+  margin-left: 1rem;
+  border-left: 1px dashed #ced4da;
+  padding-left: 0.5rem;
+}

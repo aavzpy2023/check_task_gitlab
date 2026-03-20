@@ -170,6 +170,10 @@ class ConfigProject(BaseModel):
     name: str
     is_active: bool
 
+class ProjectEditRequest(BaseModel):
+    new_id: int
+    new_name: str
+
 class TesterAuditMetrics(BaseModel):
     username: str
     issues_raised: int = 0
@@ -189,7 +193,14 @@ def gitlab_api_request(method: str, endpoint: str, **kwargs) -> Optional[request
     headers = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
     api_url = f"{GITLAB_URL}/api/v4/{endpoint}"
     try:
-        response = requests.request(method, api_url, headers=headers, verify=False, timeout=15, **kwargs)
+        # FIX: requests automatically unquotes %2F to /. We prepare the request and restore the exact URL.
+        session = requests.Session()
+        req = requests.Request(method, api_url, headers=headers, **kwargs)
+        prep = session.prepare_request(req)
+        parsed = urllib.parse.urlparse(prep.url)
+        prep.url = f"{api_url}?{parsed.query}" if parsed.query else api_url
+        
+        response = session.send(prep, verify=False, timeout=15)
         return response
     except requests.exceptions.RequestException:
         return None
@@ -752,9 +763,18 @@ def http_gitlab_api_request(method: str, endpoint: str, **kwargs) -> requests.Re
     headers = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
     api_url = f"{GITLAB_URL}/api/v4/{endpoint}"
     try:
-        response = requests.request(method, api_url, headers=headers, verify=False, timeout=10, **kwargs)
+        # FIX: requests automatically unquotes %2F to /. We prepare the request and restore the exact URL.
+        session = requests.Session()
+        req = requests.Request(method, api_url, headers=headers, **kwargs)
+        prep = session.prepare_request(req)
+        parsed = urllib.parse.urlparse(prep.url)
+        prep.url = f"{api_url}?{parsed.query}" if parsed.query else api_url
+        
+        response = session.send(prep, verify=False, timeout=10)
         response.raise_for_status()
         return response
+    except requests.exceptions.HTTPError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"GitLab API Error: {e}")
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=502, detail=f"Error de red: {e}")
 
@@ -846,18 +866,62 @@ def get_wiki_pages_list(project_id: int):
     """
     Obtiene la lista de páginas de la wiki para un proyecto específico.
     """
-    response = http_gitlab_api_request("get", f"projects/{project_id}/wikis")
-    return response.json()
+    try:
+        response = http_gitlab_api_request("get", f"projects/{project_id}/wikis")
+        return response.json()
+    except HTTPException:
+        # Retornamos lista vacía ante cualquier error (404, 502, timeouts) para evitar que el UI colapse
+        return[]
 
-@app.get("/wiki/projects/{project_id}/pages/{slug}", tags=["Wiki"])
+@app.get("/wiki/projects/{project_id}/pages/{slug:path}", tags=["Wiki"])
 def get_wiki_page_content(project_id: int, slug: str):
     """
     Obtiene el contenido de una página específica.
     """
     # GitLab requiere que el slug sea URL-encoded si contiene espacios o caracteres especiales
     safe_slug = urllib.parse.quote(slug, safe='')
-    response = http_gitlab_api_request("get", f"projects/{project_id}/wikis/{safe_slug}")
-    return response.json()
+    try:
+        response = http_gitlab_api_request("get", f"projects/{project_id}/wikis/{safe_slug}")
+        return response.json()
+    except HTTPException as e:
+        return {
+            "title": "Error de Disponibilidad",
+            "content": f"> **Aviso:** No se pudo recuperar el contenido de esta página desde GitLab (Código de estado: {e.status_code}).\n\nVerifique su conexión de red o si la wiki sigue activa."
+        }
+
+@app.get("/wiki/projects/{project_id}/generate_pdf/{slug:path}", tags=["Wiki"])
+def generate_pdf(project_id: int, slug: str):
+    """
+    Genera y retorna un PDF a partir del contenido Markdown de la wiki.
+    """
+    safe_slug = urllib.parse.quote(slug, safe='')
+    try:
+        response = http_gitlab_api_request("get", f"projects/{project_id}/wikis/{safe_slug}")
+        data = response.json()
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail="Error de comunicación con GitLab al intentar generar el PDF.")
+    
+    if "content" not in data:
+        raise HTTPException(status_code=404, detail="Página no encontrada o sin contenido.")
+        
+    content = data["content"]
+    title = data.get("title", "documento")
+    
+    # FIX: Pandoc crashes (500 Internal Server Error) when it encounters relative images 
+    # it cannot find locally. We scrub Markdown and HTML images before PDF conversion.
+    content_for_pdf = re.sub(r'!\[.*?\]\((.*?)\)', r'\n> 🖼️ *[Imagen Omitida en PDF: \1]*\n', content)
+    content_for_pdf = re.sub(r'<img\s+[^>]*src="([^"]+)"[^>]*>', r'\n> 🖼️ *[Imagen HTML Omitida en PDF: \1]*\n', content_for_pdf)
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        pdf_path = tmp.name
+        
+    try:
+        # FIX: Añadimos weasyprint como motor para evitar el fallo de "pdflatex not found"
+        # y procesar correctamente los caracteres UTF-8 sin requerir distribuciones completas de LaTeX.
+        pypandoc.convert_text(content_for_pdf, 'pdf', format='md', outputfile=pdf_path, extra_args=['--pdf-engine=weasyprint'])
+        return FileResponse(pdf_path, filename=f"{title}.pdf", media_type="application/pdf")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generando PDF: {str(e)}")
 
 @app.get("/wiki/projects/{project_id}/audit", tags=["Wiki"])
 def audit_wiki_changes(
@@ -1073,3 +1137,42 @@ def toggle_project_state(project_id: int, db: Session = Depends(get_db)):
     project.is_active = not project.is_active
     db.commit()
     return {"id": project.project_id, "is_active": project.is_active}
+
+@app.put("/config/projects/{project_id}", response_model=ConfigProject, dependencies=[Depends(verify_config_pass)], tags=["Configuration"])
+def edit_project(project_id: int, req: ProjectEditRequest, db: Session = Depends(get_db)):
+    project = db.query(MonitoredProject).filter(MonitoredProject.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    # Migración estricta de base de datos para no violar Restricciones de Llave Foránea
+    if project_id != req.new_id:
+        existing = db.query(MonitoredProject).filter(MonitoredProject.project_id == req.new_id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="El nuevo ID ya existe.")
+        
+        new_proj = MonitoredProject(project_id=req.new_id, project_name=req.new_name, is_active=project.is_active)
+        db.add(new_proj)
+        db.flush() # Insertar para habilitar referencias
+        
+        db.execute(text("UPDATE gitlab_tasks SET project_id = :new_id WHERE project_id = :old_id"), {"new_id": req.new_id, "old_id": project_id})
+        db.execute(text("UPDATE audit_events SET project_id = :new_id WHERE project_id = :old_id"), {"new_id": req.new_id, "old_id": project_id})
+        
+        db.delete(project)
+        db.commit()
+        final_proj = new_proj
+    else:
+        project.project_name = req.new_name
+        db.commit()
+        db.refresh(project)
+        final_proj = project
+
+    # Actualización holográfica del CSV base
+    try:
+        if os.path.exists(PROJECTS_CSV_PATH):
+            df = pd.read_csv(PROJECTS_CSV_PATH)
+            df.loc[df['project_id'] == project_id, ['project_id', 'project_name']] = [req.new_id, req.new_name]
+            df.to_csv(PROJECTS_CSV_PATH, index=False)
+    except Exception as e:
+        print(f"Error actualizando CSV: {e}")
+
+    return ConfigProject(id=final_proj.project_id, name=final_proj.project_name, is_active=final_proj.is_active)

@@ -2,8 +2,9 @@
 import React, { useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { getWikiProjects, getWikiPages, getWikiPageContent } from '../services/api';
-import './DocumentationPage.css'; // Crearemos este CSS a continuación
+import { getWikiProjects, getWikiPages, getWikiPageContent, downloadWikiPdf } from '../services/api';
+import PageTree from '../components/PageTree';
+import './DocumentationPage.css';
 
 export default function DocumentationPage() {
   const [projects, setProjects] = useState([]);
@@ -28,6 +29,33 @@ export default function DocumentationPage() {
     fetchProjects();
   }, []);
 
+  const buildTree = (flatPages) => {
+    const root =[];
+    flatPages.forEach(page => {
+      const parts = page.slug.split('/');
+      let currentLevel = root;
+      parts.forEach((part, index) => {
+        const isFile = index === parts.length - 1;
+        const nodeTitle = isFile ? page.title : part;
+        
+        let existing = currentLevel.find(n => n.title === nodeTitle && n.type === (isFile ? 'file' : 'folder'));
+        
+        if (!existing) {
+          existing = {
+            id: isFile ? page.slug : parts.slice(0, index + 1).join('/'),
+            title: nodeTitle,
+            slug: isFile ? page.slug : null,
+            type: isFile ? 'file' : 'folder',
+            children:[]
+          };
+          currentLevel.push(existing);
+        }
+        currentLevel = existing.children;
+      });
+    });
+    return root;
+  };
+
   // 2. Cargar lista de páginas cuando cambia el proyecto seleccionado
   useEffect(() => {
     if (!selectedProjectId) return;
@@ -39,8 +67,9 @@ export default function DocumentationPage() {
       setPageContent('');
       try {
         const data = await getWikiPages(selectedProjectId);
-        setPages(data);
-        // Seleccionar la página 'home' por defecto si existe, o la primera
+        setPages(buildTree(data));
+        
+        // Seleccionar la página 'home' por defecto si existe
         const homePage = data.find(p => p.slug.toLowerCase() === 'home') || data[0];
         if (homePage) setSelectedPage(homePage);
       } catch (error) {
@@ -89,18 +118,13 @@ export default function DocumentationPage() {
         {loading ? (
           <p>Cargando índice...</p>
         ) : (
-          <ul className="wiki-nav-list">
-            {pages.map(page => (
-              <li 
-                key={page.slug} 
-                className={selectedPage?.slug === page.slug ? 'active' : ''}
-                onClick={() => setSelectedPage(page)}
-              >
-                {page.title}
-              </li>
-            ))}
-            {pages.length === 0 && <li className="empty-msg">No hay páginas wiki.</li>}
-          </ul>
+          <div className="wiki-nav-list">
+            {pages.length > 0 ? (
+              <PageTree nodes={pages} onSelectPage={(page) => setSelectedPage(page)} />
+            ) : (
+              <p className="empty-msg">No hay páginas wiki.</p>
+            )}
+          </div>
         )}
       </aside>
 
@@ -110,12 +134,47 @@ export default function DocumentationPage() {
           <div className="loading-spinner">Cargando contenido...</div>
         ) : selectedPage ? (
           <article className="markdown-body">
-            <h1>{selectedPage.title}</h1>
-            <div className="meta-info">
-               Última edición: {new Date(selectedPage.created_at).toLocaleDateString()}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h1 style={{ margin: 0 }}>{selectedPage.title}</h1>
+              <button 
+                className="sync-button" 
+                style={{ backgroundColor: '#17a2b8', borderColor: '#17a2b8', padding: '0.5rem 1rem' }}
+                onClick={() => downloadWikiPdf(selectedProjectId, selectedPage.slug)}
+              >
+                ⬇️ Descargar PDF
+              </button>
             </div>
+            {selectedPage.created_at && (
+              <div className="meta-info" style={{ marginTop: '0.5rem', color: '#6c757d', fontSize: '0.9rem' }}>
+                 Última edición: {new Date(selectedPage.created_at).toLocaleDateString()}
+              </div>
+            )}
             <hr />
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            <ReactMarkdown 
+              remarkPlugins={[remarkGfm]}
+              components={{
+                img: ({node, ...props}) => {
+                  if (props.src && props.src.startsWith('http')) {
+                    return <img {...props} style={{maxWidth: '100%'}} alt={props.alt || ''} />;
+                  }
+                  return (
+                    <div style={{
+                      padding: '0.75rem', 
+                      backgroundColor: '#f8f9fa', 
+                      border: '1px dashed #ced4da',
+                      color: '#6c757d',
+                      borderRadius: '4px',
+                      margin: '1rem 0',
+                      display: 'inline-block',
+                      fontSize: '0.9rem'
+                    }}>
+                      🖼️ <em>Imagen adjunta omitida: <strong>{props.src}</strong></em><br/>
+                      <small>Para visualizar imágenes relativas, acceda a la wiki directamente en GitLab.</small>
+                    </div>
+                  );
+                }
+              }}
+            >
               {pageContent}
             </ReactMarkdown>
           </article>

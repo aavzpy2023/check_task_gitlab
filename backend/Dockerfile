@@ -5,7 +5,7 @@ WORKDIR /app
 
 # SSS: Instalar la dependencia de sistema 'pandoc' requerida por 'pypandoc'.
 # Esto es esencial para la generación de PDFs.
-RUN apt-get update && apt-get install -y pandoc && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y pandoc weasyprint && rm -rf /var/lib/apt/lists/*
 
 # Copy and install dependencies first to leverage Docker layer caching
 COPY requirements.txt .

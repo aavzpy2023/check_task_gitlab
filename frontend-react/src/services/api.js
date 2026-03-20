@@ -119,11 +119,30 @@ export const getWikiPages = async (projectId) => {
 export const getWikiPageContent = async (projectId, slug) => {
   try {
     // El slug puede venir con espacios, aseguramos codificación
-    const encodedSlug = encodeURIComponent(slug);
-    const response = await apiClient.get(`/wiki/projects/${projectId}/pages/${slug}`);
+    const encodedSlug = slug.split('/').map(encodeURIComponent).join('/');
+    const response = await apiClient.get(`/wiki/projects/${projectId}/pages/${encodedSlug}`);
     return response.data;
   } catch (error) {
     console.error(`Error fetching page content for ${slug}:`, error);
+    throw error;
+  }
+};
+
+export const downloadWikiPdf = async (projectId, slug) => {
+  try {
+    const encodedSlug = slug.split('/').map(encodeURIComponent).join('/');
+    const response = await apiClient.get(`/wiki/projects/${projectId}/generate_pdf/${encodedSlug}`, {
+      responseType: 'blob'
+    });
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${slug.split('/').pop()}.pdf`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } catch (error) {
+    console.error("Error downloading PDF:", error);
     throw error;
   }
 };
@@ -214,5 +233,17 @@ export const toggleProjectState = async (projectId, password) => {
     return response.data;
   } catch (error) {
     throw new Error("Fallo al cambiar el estado del proyecto");
+  }
+};
+
+export const updateProject = async (oldProjectId, newId, newName, password) => {
+  try {
+    const response = await apiClient.put(`/config/projects/${oldProjectId}`, 
+      { new_id: parseInt(newId), new_name: newName }, 
+      { headers: { 'X-Config-Pass': password } }
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(error.response?.data?.detail || "Fallo al actualizar el proyecto");
   }
 };

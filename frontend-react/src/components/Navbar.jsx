@@ -34,7 +34,7 @@ const Navbar = () => (
       </NavLink>
 
       <NavLink 
-        to="/audit/" 
+        to="/audit" 
         className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
       >
         Auditoría

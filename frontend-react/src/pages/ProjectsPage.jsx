@@ -1,16 +1,22 @@
 
 import React, { useState, useEffect } from 'react';
-import { verifyConfigAccess, getConfigProjects, toggleProjectState } from '../services/api';
+import { verifyConfigAccess, getConfigProjects, toggleProjectState, updateProject } from '../services/api';
 
 function ProjectsPage() {
-  const [configPass, setConfigPass] = useState(sessionStorage.getItem('config_pass') || '');
+  const[configPass, setConfigPass] = useState(sessionStorage.getItem('config_pass') || '');
   const [inputPass, setInputPass] = useState('');
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [authError, setAuthError] = useState('');
-  const [processingId, setProcessingId] = useState(null);
+  const[processingId, setProcessingId] = useState(null);
+  
+  const [editingProject, setEditingProject] = useState(null);
+  const [editForm, setEditForm] = useState({ id: '', name: '' });
+  const[editLoading, setEditLoading] = useState(false);
+  const [editError, setEditError] = useState('');
 
+  
   // Auto-fetch if token exists in session
   useEffect(() => {
     if (configPass) {
@@ -64,6 +70,26 @@ function ProjectsPage() {
       setError(err.message);
     } finally {
       setProcessingId(null);
+    }
+  };
+
+  const handleOpenEdit = (project) => {
+    setEditingProject(project.id);
+    setEditForm({ id: project.id, name: project.name });
+    setEditError('');
+  };
+
+  const handleSaveEdit = async () => {
+    setEditLoading(true);
+    setEditError('');
+    try {
+      const updated = await updateProject(editingProject, editForm.id, editForm.name, configPass);
+      setProjects(prev => prev.map(p => p.id === editingProject ? updated : p));
+      setEditingProject(null);
+    } catch (err) {
+      setEditError(err.message);
+    } finally {
+      setEditLoading(false);
     }
   };
 
@@ -128,13 +154,23 @@ function ProjectsPage() {
                   <td style={{ padding: '1rem', fontWeight: 'bold', color: '#495057' }}>{p.id}</td>
                   <td style={{ padding: '1rem' }}>{p.name}</td>
                   <td style={{ padding: '1rem', textAlign: 'center' }}>
-                    <button 
-                      className={`toggle-btn ${p.is_active ? 'active' : 'inactive'}`}
-                      onClick={() => handleToggle(p.id)}
-                      disabled={processingId === p.id}
-                    >
-                      {processingId === p.id ? '⏳...' : (p.is_active ? '🟢 Activo' : '🔴 Inactivo')}
-                    </button>
+                    <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center' }}>
+                      <button 
+                        className={`toggle-btn ${p.is_active ? 'active' : 'inactive'}`}
+                        onClick={() => handleToggle(p.id)}
+                        disabled={processingId === p.id}
+                      >
+                        {processingId === p.id ? '⏳...' : (p.is_active ? '🟢 Activo' : '🔴 Inactivo')}
+                      </button>
+                      <button 
+                        className="toggle-btn"
+                        style={{ backgroundColor: '#ffc107', color: '#212529', borderColor: '#ffc107' }}
+                        onClick={() => handleOpenEdit(p)}
+                        disabled={processingId === p.id}
+                      >
+                        ✏️ Editar
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -142,6 +178,52 @@ function ProjectsPage() {
           </table>
         )}
       </div>
+
+      {editingProject && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+          <div style={{ backgroundColor: 'white', padding: '2rem', borderRadius: '8px', width: '400px', maxWidth: '90%', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
+            <h3 style={{ marginTop: 0 }}>✏️ Editar Proyecto</h3>
+            {editError && <p className="error-message" style={{ color: '#dc3545', padding: '0.5rem 0', textAlign: 'left' }}>{editError}</p>}
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>ID del Proyecto (GitLab)</label>
+              <input 
+                type="number" 
+                className="auth-input" 
+                style={{ marginBottom: 0 }}
+                value={editForm.id} 
+                onChange={e => setEditForm({...editForm, id: e.target.value})} 
+              />
+            </div>
+            <div style={{ marginBottom: '1.5rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>Nombre del Proyecto</label>
+              <input 
+                type="text" 
+                className="auth-input" 
+                style={{ marginBottom: 0 }}
+                value={editForm.name} 
+                onChange={e => setEditForm({...editForm, name: e.target.value})} 
+              />
+            </div>
+            <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+              <button 
+                className="sync-button" 
+                style={{ backgroundColor: '#6c757d', borderColor: '#6c757d' }} 
+                onClick={() => setEditingProject(null)} 
+                disabled={editLoading}
+              >
+                Cancelar
+              </button>
+              <button 
+                className="sync-button" 
+                onClick={handleSaveEdit} 
+                disabled={editLoading}
+              >
+                {editLoading ? 'Guardando...' : 'Guardar Cambios'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

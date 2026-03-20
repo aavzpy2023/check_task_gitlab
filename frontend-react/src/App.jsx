@@ -36,7 +36,10 @@ const DebugLocation = () => {
 // SSS: ESTA LÍNEA ES LA QUE FALTABA. NO LA BORRES.
 function App() {
   return (
-    <BrowserRouter basename="/tareas">
+    <BrowserRouter 
+      basename="/tareas"
+      future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+    >
       <div className="app-container">
         
         {/* Marca de versión v9.4 */}

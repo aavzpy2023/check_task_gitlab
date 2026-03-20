@@ -13,3 +13,4 @@ __pycache__/
 /frontend_v10.tar
 /.idea/.gitignore
 /.idea/vcs.xml
+.opencode
