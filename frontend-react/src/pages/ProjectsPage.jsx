@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { verifyConfigAccess, getConfigProjects, toggleProjectState, updateProject } from '../services/api';
+import { verifyConfigAccess, getConfigProjects, toggleProjectState, updateProject, createProject } from '../services/api';
 
 function ProjectsPage() {
   const[configPass, setConfigPass] = useState(sessionStorage.getItem('config_pass') || '');
@@ -15,6 +15,11 @@ function ProjectsPage() {
   const [editForm, setEditForm] = useState({ id: '', name: '' });
   const[editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState('');
+  
+  const [isCreating, setIsCreating] = useState(false);
+  const [createForm, setCreateForm] = useState({ id: '', name: '', is_active: false });
+  const [createLoading, setCreateLoading] = useState(false);
+  const [createError, setCreateError] = useState('');
 
   
   // Auto-fetch if token exists in session
@@ -93,6 +98,21 @@ function ProjectsPage() {
     }
   };
 
+  const handleCreateProject = async () => {
+    setCreateLoading(true);
+    setCreateError('');
+    try {
+      const newProj = await createProject(createForm.id, createForm.name, createForm.is_active, configPass);
+      setProjects(prev => [...prev, newProj]);
+      setIsCreating(false);
+      setCreateForm({ id: '', name: '', is_active: false });
+    } catch (err) {
+      setCreateError(err.message);
+    } finally {
+      setCreateLoading(false);
+    }
+  };
+
   // --- UI: Auth Guard View ---
   if (!configPass) {
     return (
@@ -134,7 +154,15 @@ function ProjectsPage() {
       </div>
 
       <div className="project-list" style={{ backgroundColor: '#fff', padding: '2rem', borderRadius: '8px', border: '1px solid #dee2e6' }}>
-        <h3 style={{ marginTop: 0 }}>Proyectos Actuales</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h3 style={{ margin: 0 }}>Proyectos Actuales</h3>
+          <button 
+            className="sync-button" 
+            onClick={() => setIsCreating(true)}
+          >
+            + Nuevo Proyecto
+          </button>
+        </div>
         
         {loading && <p>Cargando lista de proyectos...</p>}
         {error && <p className="error-message" style={{ color: '#dc3545', padding: '1rem 0' }}>{error}</p>}
@@ -219,6 +247,64 @@ function ProjectsPage() {
                 disabled={editLoading}
               >
                 {editLoading ? 'Guardando...' : 'Guardar Cambios'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isCreating && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+          <div style={{ backgroundColor: 'white', padding: '2rem', borderRadius: '8px', width: '400px', maxWidth: '90%', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
+            <h3 style={{ marginTop: 0 }}>✨ Nuevo Proyecto</h3>
+            {createError && <p className="error-message" style={{ color: '#dc3545', padding: '0.5rem 0', textAlign: 'left' }}>{createError}</p>}
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>ID del Proyecto (GitLab)</label>
+              <input 
+                type="number" 
+                className="auth-input" 
+                style={{ marginBottom: 0 }}
+                value={createForm.id} 
+                onChange={e => setCreateForm({...createForm, id: e.target.value})} 
+              />
+            </div>
+            <div style={{ marginBottom: '1.5rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>Nombre del Proyecto</label>
+              <input 
+                type="text" 
+                className="auth-input" 
+                style={{ marginBottom: 0 }}
+                value={createForm.name} 
+                onChange={e => setCreateForm({...createForm, name: e.target.value})} 
+              />
+            </div>
+            <div style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input 
+                type="checkbox" 
+                id="isActiveCheckbox"
+                checked={createForm.is_active} 
+                onChange={e => setCreateForm({...createForm, is_active: e.target.checked})} 
+                style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+              />
+              <label htmlFor="isActiveCheckbox" style={{ fontWeight: 'bold', cursor: 'pointer', margin: 0, color: '#495057' }}>
+                Activar proyecto inmediatamente
+              </label>
+            </div>
+            <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+              <button 
+                className="sync-button" 
+                style={{ backgroundColor: '#6c757d', borderColor: '#6c757d' }} 
+                onClick={() => { setIsCreating(false); setCreateForm({ id: '', name: '', is_active: false }); setCreateError(''); }} 
+                disabled={createLoading}
+              >
+                Cancelar
+              </button>
+              <button 
+                className="sync-button" 
+                onClick={handleCreateProject} 
+                disabled={createLoading || !createForm.id || !createForm.name}
+              >
+                {createLoading ? 'Creando...' : 'Crear Proyecto'}
               </button>
             </div>
           </div>

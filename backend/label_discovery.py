@@ -13,12 +13,13 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Cargar variables de entorno (asume que se ejecuta en el mismo entorno que la app)
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
 
 load_dotenv()
 
 GITLAB_URL = os.getenv("GITLAB_URL")
 PRIVATE_TOKEN = os.getenv("GITLAB_TOKEN")
-PROJECTS_CSV_PATH = "./projects.csv"
+DATABASE_URL = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_HOST', 'postgres_chatbot')}:5432/{os.getenv('POSTGRES_DB')}"
 
 
 def gitlab_api_request(method: str, endpoint: str, **kwargs) -> requests.Response:
@@ -53,17 +54,13 @@ def discover_labels():
         "IN_PROGRESS": ["ejecucion", "ejecución"],
     }
 
-    if not os.path.exists(PROJECTS_CSV_PATH):
-        print(
-            f"FATAL: No se encontró el archivo '{PROJECTS_CSV_PATH}'.", file=sys.stderr
-        )
-        return
-
     try:
-        projects_df = pd.read_csv(PROJECTS_CSV_PATH)
-        project_ids = projects_df["project_id"].tolist()
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT project_id FROM monitored_projects"))
+            project_ids = [row[0] for row in result]
     except Exception as e:
-        print(f"FATAL: Error al leer '{PROJECTS_CSV_PATH}': {e}", file=sys.stderr)
+        print(f"FATAL: Error al leer desde la BD: {e}", file=sys.stderr)
         return
 
     print(f"Se auditarán {len(project_ids)} proyectos.")

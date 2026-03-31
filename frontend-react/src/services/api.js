@@ -247,3 +247,15 @@ export const updateProject = async (oldProjectId, newId, newName, password) => {
     throw new Error(error.response?.data?.detail || "Fallo al actualizar el proyecto");
   }
 };
+
+export const createProject = async (id, name, isActive, password) => {
+  try {
+    const response = await apiClient.post('/config/projects', 
+      { id: parseInt(id), name: name, is_active: isActive }, 
+      { headers: { 'X-Config-Pass': password } }
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(error.response?.data?.detail || "Fallo al crear el proyecto");
+  }
+};

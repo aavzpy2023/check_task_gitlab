@@ -50,7 +50,6 @@ PRIVATE_TOKEN = os.getenv("GITLAB_TOKEN")
 # SSS: CORRECCION TYPO (POSTGRES_PASSWORD)
 DATABASE_URL = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_HOST', 'postgres_chatbot')}:5432/{os.getenv('POSTGRES_DB')}"
 SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", 3600))
-PROJECTS_CSV_PATH = "./projects.csv"
 SYNC_IN_PROGRESS = False
 AUDIT_SYNC_IN_PROGRESS = False
 MASTER_SYNC_LOCK = Lock()
@@ -173,6 +172,11 @@ class ConfigProject(BaseModel):
 class ProjectEditRequest(BaseModel):
     new_id: int
     new_name: str
+
+class ProjectCreateRequest(BaseModel):
+    id: int
+    name: str
+    is_active: bool = False
 
 class TesterAuditMetrics(BaseModel):
     username: str
@@ -739,15 +743,8 @@ async def lifespan(app: FastAPI):
         Base.metadata.create_all(bind=engine)
         db.execute(text("ALTER TABLE monitored_projects ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;"))
         db.commit()
-
-        if os.path.exists(PROJECTS_CSV_PATH):
-            df = pd.read_csv(PROJECTS_CSV_PATH)
-            for _, row in df.iterrows():
-                stmt = pg_insert(MonitoredProject).values(project_id=row['project_id'], project_name=row['project_name']).on_conflict_do_update(index_elements=['project_id'], set_={'project_name': row['project_name']})
-                db.execute(stmt)
-            db.commit()
     except Exception as e:
-         print(f"--- [STARTUP] Error poblando proyectos: {e}")
+         print(f"--- [STARTUP] Error al inicializar la base de datos: {e}")
     finally:
         db.close()
 
@@ -1166,13 +1163,21 @@ def edit_project(project_id: int, req: ProjectEditRequest, db: Session = Depends
         db.refresh(project)
         final_proj = project
 
-    # Actualización holográfica del CSV base
-    try:
-        if os.path.exists(PROJECTS_CSV_PATH):
-            df = pd.read_csv(PROJECTS_CSV_PATH)
-            df.loc[df['project_id'] == project_id, ['project_id', 'project_name']] = [req.new_id, req.new_name]
-            df.to_csv(PROJECTS_CSV_PATH, index=False)
-    except Exception as e:
-        print(f"Error actualizando CSV: {e}")
-
     return ConfigProject(id=final_proj.project_id, name=final_proj.project_name, is_active=final_proj.is_active)
+
+@app.post("/config/projects", response_model=ConfigProject, dependencies=[Depends(verify_config_pass)], tags=["Configuration"])
+def create_project(req: ProjectCreateRequest, db: Session = Depends(get_db)):
+    existing = db.query(MonitoredProject).filter(MonitoredProject.project_id == req.id).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="El ID del proyecto ya existe en la base de datos.")
+    
+    # Verificar en GitLab
+    resp = gitlab_api_request("get", f"projects/{req.id}")
+    if not resp or resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"El proyecto con ID {req.id} no existe en GitLab o el token no tiene acceso.")
+    
+    new_proj = MonitoredProject(project_id=req.id, project_name=req.name, is_active=req.is_active)
+    db.add(new_proj)
+    db.commit()
+    db.refresh(new_proj)
+    return ConfigProject(id=new_proj.project_id, name=new_proj.project_name, is_active=new_proj.is_active)
