@@ -615,7 +615,8 @@ def download_wiki_images(content: str, project_id: int) -> str:
                     filepath = f"/app/data/wiki_images/{filename}"
                     with open(filepath, "wb") as f:
                         f.write(resp.content)
-                    new_url = f"/api/static/{filename}"
+                    # SSS: Usar el prefijo completo del reverse proxy para que el navegador lo encuentre
+                    new_url = f"/tareas/api/static/{filename}"
                     if len(match.groups()) > 1:
                         return f"![{match.group(1)}]({new_url})"
                     else:
@@ -663,7 +664,6 @@ def sync_project_wiki(project_id: int, db: Session):
                 }
             )
             db.execute(stmt)
-    db.commit()
 
 def sync_single_project(project_id: int, db: Session):
     try:
@@ -970,9 +970,11 @@ def get_wiki_page_content(project_id: int, slug: str, db: Session = Depends(get_
     """
     page = db.query(WikiPageDB).filter(WikiPageDB.project_id == project_id, WikiPageDB.slug == slug).first()
     if page:
+        # Corrección "en caliente" por si quedaron rutas viejas en la BD de sincronizaciones anteriores
+        content = page.content.replace('/api/static/', '/tareas/api/static/') if page.content else ""
         return {
             "title": page.title,
-            "content": page.content,
+            "content": content,
             "created_at": page.created_at.isoformat() if page.created_at else None,
             "updated_at": page.updated_at.isoformat() if page.updated_at else None
         }
@@ -995,7 +997,8 @@ def generate_pdf(project_id: int, slug: str, db: Session = Depends(get_db)):
     
     # Modificar las URLs de las imágenes relativas servidas por API a sus equivalentes físicos reales 
     # en el contenedor para que Weasyprint pueda renderizarlas en el PDF sin problemas de red.
-    content_for_pdf = page.content.replace('/api/static/', '/app/data/wiki_images/')
+    # Atrapamos tanto la ruta vieja como la nueva.
+    content_for_pdf = page.content.replace('/tareas/api/static/', '/app/data/wiki_images/').replace('/api/static/', '/app/data/wiki_images/')
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         pdf_path = tmp.name
