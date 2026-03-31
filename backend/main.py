@@ -21,7 +21,9 @@ import pandas as pd
 import pypandoc
 import requests
 import urllib3
+import uuid
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Header
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
@@ -124,6 +126,21 @@ class AuditEventDB(Base):
 
     __table_args__ = (
         UniqueConstraint('project_id', 'event_type', 'reference_id', 'username', name='uix_audit_event_idemp'),
+    )
+
+class WikiPageDB(Base):
+    """Database model for storing downloaded wiki pages"""
+    __tablename__ = "wiki_pages"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    project_id = Column(BigInteger, ForeignKey("monitored_projects.project_id"), nullable=False, index=True)
+    slug = Column(String(255), nullable=False)
+    title = Column(String(255), nullable=False)
+    content = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('project_id', 'slug', name='uix_wiki_page'),
     )
 
 class CycleMetrics(BaseModel):
@@ -579,7 +596,81 @@ def fetch_and_store_issue_reviews(project_id: int, month: int, year: int, db: Se
     db.commit()
 
 
+def download_wiki_images(content: str, project_id: int) -> str:
+    if not content: return ""
+    
+    def replacer(match):
+        full_match = match.group(0)
+        url = match.group(2) if len(match.groups()) > 1 else match.group(1)
+        
+        if not url.startswith("http") and ("/uploads/" in url or url.startswith("/")):
+            clean_url = url.lstrip("/")
+            full_url = f"{GITLAB_URL}/{clean_url}"
+            try:
+                resp = requests.get(full_url, headers={"PRIVATE-TOKEN": PRIVATE_TOKEN}, verify=False, timeout=10)
+                if resp.status_code == 200:
+                    ext = url.split('.')[-1] if '.' in url else 'png'
+                    ext = ext.split('?')[0]
+                    filename = f"{uuid.uuid4().hex}.{ext}"
+                    filepath = f"/app/data/wiki_images/{filename}"
+                    with open(filepath, "wb") as f:
+                        f.write(resp.content)
+                    new_url = f"/api/static/{filename}"
+                    if len(match.groups()) > 1:
+                        return f"![{match.group(1)}]({new_url})"
+                    else:
+                        return f'src="{new_url}"'
+            except Exception as e:
+                print(f"Error downloading image {full_url}: {e}")
+        return full_match
+
+    content = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', replacer, content)
+    content = re.sub(r'src="([^"]+)"', replacer, content)
+    return content
+
+def sync_project_wiki(project_id: int, db: Session):
+    print(f"--- [SYNC] Sincronizando Wiki para proyecto {project_id}... ---")
+    resp = gitlab_api_request("get", f"projects/{project_id}/wikis")
+    if not resp or resp.status_code != 200:
+        return
+    
+    pages = resp.json()
+    for page in pages:
+        slug = page.get("slug")
+        safe_slug = urllib.parse.quote(slug, safe='')
+        detail_resp = gitlab_api_request("get", f"projects/{project_id}/wikis/{safe_slug}")
+        if detail_resp and detail_resp.status_code == 200:
+            detail = detail_resp.json()
+            content = detail.get("content", "")
+            
+            processed_content = download_wiki_images(content, project_id)
+            created_at = datetime.fromisoformat(detail.get("created_at").replace('Z', '+00:00')) if detail.get("created_at") else None
+            updated_at = datetime.fromisoformat(detail.get("updated_at").replace('Z', '+00:00')) if detail.get("updated_at") else None
+            
+            stmt = pg_insert(WikiPageDB).values(
+                project_id=project_id,
+                slug=slug,
+                title=detail.get("title", ""),
+                content=processed_content,
+                created_at=created_at,
+                updated_at=updated_at
+            ).on_conflict_do_update(
+                index_elements=['project_id', 'slug'],
+                set_={
+                    'title': detail.get("title", ""),
+                    'content': processed_content,
+                    'updated_at': updated_at
+                }
+            )
+            db.execute(stmt)
+    db.commit()
+
 def sync_single_project(project_id: int, db: Session):
+    try:
+        sync_project_wiki(project_id, db)
+    except Exception as e:
+        print(f"Error sincronizando wiki del proyecto {project_id}: {e}")
+        
     tasks_found = defaultdict(list)
     for status_enum, label_variations in LABEL_MAPPING.items():
         for label in label_variations:
@@ -754,6 +845,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Portal API v6.7.0", version="6.7.0", lifespan=lifespan, root_path="/api")
 
+os.makedirs("/app/data/wiki_images", exist_ok=True)
+app.mount("/static", StaticFiles(directory="/app/data/wiki_images"), name="static")
+
 # --- Endpoints ---
 def http_gitlab_api_request(method: str, endpoint: str, **kwargs) -> requests.Response:
     if not PRIVATE_TOKEN: raise HTTPException(status_code=500, detail="GitLab token no configurado.")
@@ -859,62 +953,55 @@ def get_projects_with_wiki(db: Session = Depends(get_db)):
     return [ProjectSummary(id=p.project_id, name=p.project_name, review_task_count=0) for p in projects]
 
 @app.get("/wiki/projects/{project_id}/pages", tags=["Wiki"])
-def get_wiki_pages_list(project_id: int):
+def get_wiki_pages_list(project_id: int, db: Session = Depends(get_db)):
     """
-    Obtiene la lista de páginas de la wiki para un proyecto específico.
+    Obtiene la lista de páginas de la wiki para un proyecto específico desde la base de datos local.
     """
     try:
-        response = http_gitlab_api_request("get", f"projects/{project_id}/wikis")
-        return response.json()
-    except HTTPException:
-        # Retornamos lista vacía ante cualquier error (404, 502, timeouts) para evitar que el UI colapse
-        return[]
+        pages = db.query(WikiPageDB).filter(WikiPageDB.project_id == project_id).all()
+        return [{"id": p.id, "slug": p.slug, "title": p.title} for p in pages]
+    except Exception as e:
+        return []
 
 @app.get("/wiki/projects/{project_id}/pages/{slug:path}", tags=["Wiki"])
-def get_wiki_page_content(project_id: int, slug: str):
+def get_wiki_page_content(project_id: int, slug: str, db: Session = Depends(get_db)):
     """
-    Obtiene el contenido de una página específica.
+    Obtiene el contenido de una página específica desde la base de datos local.
     """
-    # GitLab requiere que el slug sea URL-encoded si contiene espacios o caracteres especiales
-    safe_slug = urllib.parse.quote(slug, safe='')
-    try:
-        response = http_gitlab_api_request("get", f"projects/{project_id}/wikis/{safe_slug}")
-        return response.json()
-    except HTTPException as e:
+    page = db.query(WikiPageDB).filter(WikiPageDB.project_id == project_id, WikiPageDB.slug == slug).first()
+    if page:
         return {
-            "title": "Error de Disponibilidad",
-            "content": f"> **Aviso:** No se pudo recuperar el contenido de esta página desde GitLab (Código de estado: {e.status_code}).\n\nVerifique su conexión de red o si la wiki sigue activa."
+            "title": page.title,
+            "content": page.content,
+            "created_at": page.created_at.isoformat() if page.created_at else None,
+            "updated_at": page.updated_at.isoformat() if page.updated_at else None
+        }
+    else:
+        return {
+            "title": "Página no encontrada",
+            "content": "> **Aviso:** Esta página no se encuentra en la base de datos local. Asegúrese de que la sincronización del proyecto haya finalizado."
         }
 
 @app.get("/wiki/projects/{project_id}/generate_pdf/{slug:path}", tags=["Wiki"])
-def generate_pdf(project_id: int, slug: str):
+def generate_pdf(project_id: int, slug: str, db: Session = Depends(get_db)):
     """
-    Genera y retorna un PDF a partir del contenido Markdown de la wiki.
+    Genera y retorna un PDF a partir del contenido Markdown de la wiki local resolviendo imágenes internamente.
     """
-    safe_slug = urllib.parse.quote(slug, safe='')
-    try:
-        response = http_gitlab_api_request("get", f"projects/{project_id}/wikis/{safe_slug}")
-        data = response.json()
-    except HTTPException as e:
-        raise HTTPException(status_code=e.status_code, detail="Error de comunicación con GitLab al intentar generar el PDF.")
-    
-    if "content" not in data:
-        raise HTTPException(status_code=404, detail="Página no encontrada o sin contenido.")
+    page = db.query(WikiPageDB).filter(WikiPageDB.project_id == project_id, WikiPageDB.slug == slug).first()
+    if not page or not page.content:
+        raise HTTPException(status_code=404, detail="Página no encontrada o sin contenido local.")
         
-    content = data["content"]
-    title = data.get("title", "documento")
+    title = page.title
     
-    # FIX: Pandoc crashes (500 Internal Server Error) when it encounters relative images 
-    # it cannot find locally. We scrub Markdown and HTML images before PDF conversion.
-    content_for_pdf = re.sub(r'!\[.*?\]\((.*?)\)', r'\n> 🖼️ *[Imagen Omitida en PDF: \1]*\n', content)
-    content_for_pdf = re.sub(r'<img\s+[^>]*src="([^"]+)"[^>]*>', r'\n> 🖼️ *[Imagen HTML Omitida en PDF: \1]*\n', content_for_pdf)
+    # Modificar las URLs de las imágenes relativas servidas por API a sus equivalentes físicos reales 
+    # en el contenedor para que Weasyprint pueda renderizarlas en el PDF sin problemas de red.
+    content_for_pdf = page.content.replace('/api/static/', '/app/data/wiki_images/')
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         pdf_path = tmp.name
         
     try:
-        # FIX: Añadimos weasyprint como motor para evitar el fallo de "pdflatex not found"
-        # y procesar correctamente los caracteres UTF-8 sin requerir distribuciones completas de LaTeX.
+        # FIX: Añadimos weasyprint como motor para procesar los estilos CSS modernos e imágenes locales
         pypandoc.convert_text(content_for_pdf, 'pdf', format='md', outputfile=pdf_path, extra_args=['--pdf-engine=weasyprint'])
         return FileResponse(pdf_path, filename=f"{title}.pdf", media_type="application/pdf")
     except Exception as e:

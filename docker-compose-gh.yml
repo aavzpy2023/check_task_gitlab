@@ -6,6 +6,7 @@ services:
     container_name: gitlab_dashboard_backend
     volumes:
       - ./backend:/app
+      - ./backend/data:/app/data
     env_file:
       - .env
     expose:
@@ -38,7 +39,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "${POSTGRES_PORT}:5432"
+      - "5439:5432"
     # SSS: Aseguramos que la base de datos se una explícitamente a la red
     networks:
       - app-network

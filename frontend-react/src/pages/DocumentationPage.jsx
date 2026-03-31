@@ -154,24 +154,7 @@ export default function DocumentationPage() {
               remarkPlugins={[remarkGfm]}
               components={{
                 img: ({node, ...props}) => {
-                  if (props.src && props.src.startsWith('http')) {
-                    return <img {...props} style={{maxWidth: '100%'}} alt={props.alt || ''} />;
-                  }
-                  return (
-                    <div style={{
-                      padding: '0.75rem', 
-                      backgroundColor: '#f8f9fa', 
-                      border: '1px dashed #ced4da',
-                      color: '#6c757d',
-                      borderRadius: '4px',
-                      margin: '1rem 0',
-                      display: 'inline-block',
-                      fontSize: '0.9rem'
-                    }}>
-                      🖼️ <em>Imagen adjunta omitida: <strong>{props.src}</strong></em><br/>
-                      <small>Para visualizar imágenes relativas, acceda a la wiki directamente en GitLab.</small>
-                    </div>
-                  );
+                  return <img {...props} style={{maxWidth: '100%'}} alt={props.alt || ''} />;
                 }
               }}
             >
