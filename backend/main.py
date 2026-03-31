@@ -599,31 +599,72 @@ def fetch_and_store_issue_reviews(project_id: int, month: int, year: int, db: Se
 def download_wiki_images(content: str, project_id: int) -> str:
     if not content: return ""
     
+    project_web_url = None
+    try:
+        p_resp = gitlab_api_request("get", f"projects/{project_id}")
+        if p_resp and p_resp.status_code == 200:
+            project_web_url = p_resp.json().get("web_url")
+    except Exception:
+        pass
+
     def replacer(match):
         full_match = match.group(0)
-        url = match.group(2) if len(match.groups()) > 1 else match.group(1)
+        is_markdown = full_match.startswith('![')
         
-        if not url.startswith("http") and ("/uploads/" in url or url.startswith("/")):
+        if is_markdown:
+            alt_text = match.group(1)
+            url = match.group(2).strip()
+        else:
+            url = match.group(1).strip()
+            alt_text = "Imagen"
+
+        if url.startswith("data:image"):
+            return full_match
+
+        if url.startswith("http"):
+            if GITLAB_URL not in url:
+                return full_match
+            full_url = url
+        elif url.startswith("/"):
             clean_url = url.lstrip("/")
             full_url = f"{GITLAB_URL}/{clean_url}"
-            try:
-                resp = requests.get(full_url, headers={"PRIVATE-TOKEN": PRIVATE_TOKEN}, verify=False, timeout=10)
-                if resp.status_code == 200:
-                    ext = url.split('.')[-1] if '.' in url else 'png'
-                    ext = ext.split('?')[0]
-                    filename = f"{uuid.uuid4().hex}.{ext}"
-                    filepath = f"/app/data/wiki_images/{filename}"
-                    with open(filepath, "wb") as f:
-                        f.write(resp.content)
-                    # SSS: Usar el prefijo completo del reverse proxy para que el navegador lo encuentre
-                    new_url = f"/tareas/api/static/{filename}"
-                    if len(match.groups()) > 1:
-                        return f"![{match.group(1)}]({new_url})"
-                    else:
-                        return f'src="{new_url}"'
-            except Exception as e:
-                print(f"Error downloading image {full_url}: {e}")
-        return full_match
+        else:
+            if project_web_url:
+                if url.startswith("uploads/"):
+                    full_url = f"{project_web_url}/-/wikis/{url}"
+                else:
+                    full_url = f"{project_web_url}/-/wikis/{url}"
+            else:
+                full_url = f"{GITLAB_URL}/{url}"
+                
+        try:
+            resp = requests.get(full_url, headers={"PRIVATE-TOKEN": PRIVATE_TOKEN}, verify=False, timeout=10)
+            
+            # Intento secundario si la imagen está en el root de uploads del proyecto en lugar de la wiki
+            if resp.status_code == 404 and project_web_url and url.startswith("uploads/"):
+                alt_url = f"{project_web_url}/{url}"
+                resp = requests.get(alt_url, headers={"PRIVATE-TOKEN": PRIVATE_TOKEN}, verify=False, timeout=10)
+                
+            if resp.status_code == 200:
+                ext = url.split('.')[-1] if '.' in url else 'png'
+                ext = ext.split('?')[0]
+                if len(ext) > 5: ext = 'png'
+                filename = f"{uuid.uuid4().hex}.{ext}"
+                filepath = f"/app/data/wiki_images/{filename}"
+                with open(filepath, "wb") as f:
+                    f.write(resp.content)
+                new_url = f"/tareas/api/static/{filename}"
+                if is_markdown:
+                    return f"![{alt_text}]({new_url})"
+                else:
+                    return f'src="{new_url}"'
+        except Exception as e:
+            print(f"Error downloading image {full_url}: {e}")
+
+        if is_markdown:
+            return f"*[Imagen omitida: {alt_text}]*"
+        else:
+            return 'src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="'
 
     content = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', replacer, content)
     content = re.sub(r'src="([^"]+)"', replacer, content)
@@ -970,8 +1011,8 @@ def get_wiki_page_content(project_id: int, slug: str, db: Session = Depends(get_
     """
     page = db.query(WikiPageDB).filter(WikiPageDB.project_id == project_id, WikiPageDB.slug == slug).first()
     if page:
-        # Corrección "en caliente" por si quedaron rutas viejas en la BD de sincronizaciones anteriores
-        content = page.content.replace('/api/static/', '/tareas/api/static/') if page.content else ""
+        # Corrección "en caliente": Normalizamos reemplazando ambos para evitar duplicar /tareas/tareas/
+        content = page.content.replace('/tareas/api/static/', '/api/static/').replace('/api/static/', '/tareas/api/static/') if page.content else ""
         return {
             "title": page.title,
             "content": content,
@@ -1000,6 +1041,31 @@ def generate_pdf(project_id: int, slug: str, db: Session = Depends(get_db)):
     # Atrapamos tanto la ruta vieja como la nueva.
     content_for_pdf = page.content.replace('/tareas/api/static/', '/app/data/wiki_images/').replace('/api/static/', '/app/data/wiki_images/')
     
+    # --- FIX PARA PANDOC CRASH ---
+    import os
+    def safe_pdf_image(match):
+        alt = match.group(1)
+        url = match.group(2).strip()
+        if url.startswith('/app/data/'):
+            if not os.path.exists(url):
+                return f"*[Imagen omitida: {alt}]*"
+        elif not url.startswith('http') and not url.startswith('data:'):
+            return f"*[Imagen omitida: {alt}]*"
+        return match.group(0)
+    
+    def safe_pdf_img_tag(match):
+        url = match.group(1).strip()
+        if url.startswith('/app/data/'):
+            if not os.path.exists(url):
+                return 'src=""'
+        elif not url.startswith('http') and not url.startswith('data:'):
+            return 'src=""'
+        return match.group(0)
+    
+    content_for_pdf = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', safe_pdf_image, content_for_pdf)
+    content_for_pdf = re.sub(r'src="([^"]+)"', safe_pdf_img_tag, content_for_pdf)
+    # -----------------------------
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         pdf_path = tmp.name
         
@@ -1008,7 +1074,10 @@ def generate_pdf(project_id: int, slug: str, db: Session = Depends(get_db)):
         pypandoc.convert_text(content_for_pdf, 'pdf', format='md', outputfile=pdf_path, extra_args=['--pdf-engine=weasyprint'])
         return FileResponse(pdf_path, filename=f"{title}.pdf", media_type="application/pdf")
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error generando PDF: {str(e)}")
+    
 
 @app.get("/wiki/projects/{project_id}/audit", tags=["Wiki"])
 def audit_wiki_changes(
